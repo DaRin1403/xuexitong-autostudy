@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         学习通刷课助手
 // @namespace    cx-auto-study
-// @version      1.0.1
+// @version      1.0.2
 // @description  学习通任务点自动完成:视频/音频原速静音连播、自动切章、弹题与章节测验自动答题(字体加密自动解密 + DeepSeek AI 作答)、文档/图片任务处理、拟人化防检测
 // @author       cx-auto-study contributors
 // @license      MIT
@@ -493,7 +493,12 @@
               return;
             }
             const obj = JSON.parse(res.responseText);
-            const content = ((obj.choices && obj.choices[0] && obj.choices[0].message && obj.choices[0].message.content) || '').trim();
+            let content = ((obj.choices && obj.choices[0] && obj.choices[0].message && obj.choices[0].message.content) || '').trim();
+            // 推理模型(deepseek-reasoner)有时把结论放在 reasoning_content、content 留空——取推理末尾作答案
+            if (!content) {
+              const rc = ((obj.choices && obj.choices[0] && obj.choices[0].message && obj.choices[0].message.reasoning_content) || '').trim();
+              content = rc.slice(-300);
+            }
             if (!content) { done([], '返回内容为空'); return; }
             done(parseAIAnswer(q.type, content));
           } catch (e) {
