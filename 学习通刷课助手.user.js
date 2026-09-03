@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         学习通刷课助手
 // @namespace    cx-auto-study
-// @version      1.0.0
+// @version      1.0.1
 // @description  学习通任务点自动完成:视频/音频原速静音连播、自动切章、弹题与章节测验自动答题(字体加密自动解密 + DeepSeek AI 作答)、文档/图片任务处理、拟人化防检测
 // @author       cx-auto-study contributors
 // @license      MIT
@@ -449,18 +449,34 @@
     } catch (e) { return { form: '木课工具', answer: [] }; }
   }
   let aiFailCount = 0;
+  let aiCooldownUntil = 0;
+  let aiCooldownWarned = false;
   function channelAI(q) {
     return new Promise((resolve) => {
-      if (aiFailCount >= 3) { resolve({ form: 'AI(已自动停用)', answer: [] }); return; }
+      if (Date.now() < aiCooldownUntil) {
+        if (!aiCooldownWarned) {
+          aiCooldownWarned = true;
+          log('AI 通道冷却中(连续失败后暂停 10 分钟),请检查 ⚙ 里的 Key/平台/接口地址/模型', 'warn');
+        }
+        resolve({ form: 'AI(冷却中)', answer: [] });
+        return;
+      }
       const prompt = buildAIPrompt(q);
       const data = JSON.stringify({ model: CONFIG.aiModel, messages: [{ role: 'user', content: prompt }], temperature: 0.1, max_tokens: 300 });
       const done = (answer, errLog) => {
         if (errLog) {
           aiFailCount++;
           log(`AI 请求失败(${aiFailCount}/3): ${errLog}`, 'err');
-          if (aiFailCount >= 3) log('AI 通道连续失败 3 次,本轮自动停用(刷新页面可恢复)', 'warn');
+          if (aiFailCount >= 3) {
+            aiCooldownUntil = Date.now() + 10 * 60 * 1000;
+            aiCooldownWarned = false;
+            aiFailCount = 0;
+            log('AI 通道连续失败 3 次,暂停 10 分钟后自动重试。常见原因:Key 错误/余额不足/接口地址或模型名填错', 'warn');
+          }
         } else {
           aiFailCount = 0;
+          aiCooldownUntil = 0;
+          aiCooldownWarned = false;
         }
         resolve({ form: 'AI', answer });
       };
@@ -541,7 +557,7 @@
         return ans;
       }
     }
-    log('未查到答案', 'warn');
+    log('未查到答案' + ((!CONFIG.aiEnabled || !CONFIG.aiKey) ? '(原因:AI 答题未启用,请点 ⚙ 配置)' : ''), 'warn');
     return [];
   }
 
