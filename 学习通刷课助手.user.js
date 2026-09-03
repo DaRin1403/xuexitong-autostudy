@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         学习通刷课助手
 // @namespace    cx-auto-study
-// @version      1.0.2
+// @version      1.0.3
 // @description  学习通任务点自动完成:视频/音频原速静音连播、自动切章、弹题与章节测验自动答题(字体加密自动解密 + DeepSeek AI 作答)、文档/图片任务处理、拟人化防检测
 // @author       cx-auto-study contributors
 // @license      MIT
@@ -462,7 +462,15 @@
         return;
       }
       const prompt = buildAIPrompt(q);
-      const data = JSON.stringify({ model: CONFIG.aiModel, messages: [{ role: 'user', content: prompt }], temperature: 0.1, max_tokens: 300 });
+      const data = JSON.stringify({
+        model: CONFIG.aiModel,
+        messages: [
+          { role: 'system', content: '你是答题助手。回复的第一个字符必须是最终答案,严禁输出思考过程、解释、重复题目或任何多余内容。' },
+          { role: 'user', content: prompt }
+        ],
+        temperature: 0.1,
+        max_tokens: 300
+      });
       const done = (answer, errLog) => {
         if (errLog) {
           aiFailCount++;
@@ -513,7 +521,7 @@
 
   function buildAIPrompt(q) {
     const opts = (q.options || []).map((o, i) => `${String.fromCharCode(65 + i)}.${o}`).join(' ');
-    const base = '你是一位专业的学习辅导老师,知识面广。只输出答案本身,不要任何解释。';
+    const base = '你是一位专业的学习辅导老师,知识面广。规则:你的回复必须以最终答案开头(第一个字符就是答案),只输出答案本身,不要任何解释、思考或多余文字。';
     switch (String(q.type)) {
       case '3': return `${base}\n判断题。题目:${q.question}\n只输出"正确"或"错误"。`;
       case '1': return `${base}\n多选题。题目:${q.question}\n选项:${opts}\n只输出所有正确选项的字母组合(如 ABD)。`;
