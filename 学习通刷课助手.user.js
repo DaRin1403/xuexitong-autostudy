@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         学习通刷课助手
 // @namespace    cx-auto-study
-// @version      1.0.3
+// @version      1.0.4
 // @description  学习通任务点自动完成:视频/音频原速静音连播、自动切章、弹题与章节测验自动答题(字体加密自动解密 + DeepSeek AI 作答)、文档/图片任务处理、拟人化防检测
 // @author       cx-auto-study contributors
 // @license      MIT
@@ -33,7 +33,7 @@
 
   /* ==================== 配置 ==================== */
   const DEFAULT_CONFIG = {
-    speed: 1,              // 视频倍速(1 = 原速,最安全;上限 1.5 风险自担)
+    speed: 2,              // 视频倍速(默认 2x 最快;1 = 原速最安全,2x 检测风险最高,自行权衡)
     autoVideo: true,       // 自动处理视频任务
     autoAudio: true,       // 自动处理音频任务
     autoWork: true,        // 自动做章节测验
@@ -46,7 +46,7 @@
     minAccuracy: 0.6,      // 最低正确率,低于则暂存不提交
     quizDelayMin: 3,       // 弹题作答前模拟"读题"的随机等待(秒)
     quizDelayMax: 8,
-    dailyLimitMinutes: 240, // 每日刷课时长上限(分钟),0 = 不限(纪律:防学习曲线异常)
+    dailyLimitMinutes: 0,   // 每日刷课时长上限(分钟),0 = 不限
     deliberateErrorRate: 0.08, // 故意答错率 0~0.2(拟人:真人不会全对)
     aiEnabled: false,      // 启用 DeepSeek AI 答题(需填 key)
     aiKey: '',              // 个人 API Key:点面板 ⚙ 填写(platform.deepseek.com 创建,只存本机)
@@ -71,7 +71,7 @@
     } catch (e) { /* ignore */ }
   }
   let CONFIG = loadConfig();
-  if (CONFIG.speed > 1.5) { CONFIG.speed = 1.5; }  // 2x 风险高,强制限到 1.5
+  if (CONFIG.speed > 2) { CONFIG.speed = 2; }  // 倍速上限 2x
 
   /* 题目收集器:做过的题(题干+选项+答案)自动积累,导出后交给 AI 整理成考前手册 */
   let COLLECTED = [];
@@ -290,8 +290,8 @@
     panel.id = 'cxCfgPanel';
     panel.innerHTML =
       '<div class="field"><div class="label">🎬 视频倍速</div>' +
-        '<input id="cfgSpeed" type="number" step="0.25" min="1" max="1.5" value="' + CONFIG.speed + '">' +
-        '<div class="hint">1 = 原速(最安全)。最高 1.5,超过会被强制限制;倍速越高被学习通检测的风险越大</div></div>' +
+        '<input id="cfgSpeed" type="number" step="0.25" min="1" max="2" value="' + CONFIG.speed + '">' +
+        '<div class="hint">默认 2x(最快);1 = 原速最安全,2x 被检测风险最高,自行权衡</div></div>' +
       '<div class="field"><div class="label">🤖 AI 答题(DeepSeek)</div>' +
         '<input id="cfgAI" type="checkbox" ' + (CONFIG.aiEnabled ? 'checked' : '') + '>' +
         '<div class="hint">开启后,题库查不到的题目交给大模型自动作答(单选/判断接近 100%)。需在下方填写 API Key</div></div>' +
@@ -323,7 +323,7 @@
         '<div class="hint">拟人化:真人不会全对。填 8 = 8% 概率故意答错(判断题反着点、单选题点错项);填 0 关闭;多选不受影响</div></div>' +
       '<div class="field"><div class="label">⏱ 每日刷课上限(分钟)</div>' +
         '<input id="cfgDaily" type="number" step="30" min="0" max="1440" value="' + CONFIG.dailyLimitMinutes + '">' +
-        '<div class="hint">防"一天刷完一门课"的异常学习曲线:刷满该时长自动停止,第二天自动恢复。填 0 = 不限(不建议长期 0)</div></div>' +
+        '<div class="hint">0 = 不限时长(当前默认);设正数则刷满该时长自动停止,第二天恢复。防"一天刷完"的异常曲线时可设 240</div></div>' +
       '<div class="field"><div class="label">📤 自动提交测验</div>' +
         '<input id="cfgSubmit" type="checkbox" ' + (CONFIG.autoSubmit ? 'checked' : '') + '>' +
         '<div class="hint">正确率 ≥ 60% 才自动提交;不足则暂存不交(不乱交卷),你可以回该章重做</div></div>' +
@@ -338,7 +338,7 @@
     document.getElementById('cfgSave').addEventListener('click', () => {
       CONFIG.speed = parseFloat(document.getElementById('cfgSpeed').value) || 1;
       if (CONFIG.speed < 1) CONFIG.speed = 1;
-      if (CONFIG.speed > 1.5) CONFIG.speed = 1.5;
+      if (CONFIG.speed > 2) CONFIG.speed = 2;
       CONFIG.aiEnabled = document.getElementById('cfgAI').checked;
       CONFIG.aiKey = document.getElementById('cfgAIKey').value.trim();
       CONFIG.aiModel = document.getElementById('cfgAIModel').value.trim() || 'deepseek-reasoner';
