@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         学习通刷课助手
 // @namespace    cx-auto-study
-// @version      1.0.5
+// @version      1.0.6
 // @description  学习通任务点自动完成:视频/音频原速静音连播、自动切章、弹题与章节测验自动答题(字体加密自动解密 + DeepSeek AI 作答)、文档/图片任务处理、拟人化防检测
 // @author       cx-auto-study contributors
 // @license      MIT
@@ -71,6 +71,18 @@
     } catch (e) { /* ignore */ }
   }
   let CONFIG = loadConfig();
+  // 一次性迁移(v1.0.6):旧存储的 240 分钟上限 / 1x 倍速 强制升级为新默认(0 不限 + 2x)
+  try {
+    const MIG = 'cxMigV105';
+    const done = (typeof GM_getValue !== 'undefined') ? GM_getValue(MIG, false) : localStorage.getItem(MIG);
+    if (!done) {
+      CONFIG.dailyLimitMinutes = 0;
+      CONFIG.speed = 2;
+      saveConfig(CONFIG);
+      if (typeof GM_setValue !== 'undefined') GM_setValue(MIG, true);
+      else localStorage.setItem(MIG, '1');
+    }
+  } catch (e) { /* ignore */ }
   if (CONFIG.speed > 2) { CONFIG.speed = 2; }  // 倍速上限 2x
 
   /* 题目收集器:做过的题(题干+选项+答案)自动积累,导出后交给 AI 整理成考前手册 */
