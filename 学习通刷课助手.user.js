@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         学习通刷课助手
 // @namespace    cx-auto-study
-// @version      1.0.4
+// @version      1.0.5
 // @description  学习通任务点自动完成:视频/音频原速静音连播、自动切章、弹题与章节测验自动答题(字体加密自动解密 + DeepSeek AI 作答)、文档/图片任务处理、拟人化防检测
 // @author       cx-auto-study contributors
 // @license      MIT
@@ -39,15 +39,15 @@
     autoWork: true,        // 自动做章节测验
     autoSubmit: true,      // 正确率达标自动提交测验
     autoJump: true,        // 本章完成后自动切下一章
-    answerIntervalMin: 3,  // 每题最小间隔(秒)
-    answerIntervalMax: 8,  // 每题最大间隔(秒)
-    submitDelayMin: 10,    // 提交前最小延迟(秒)
-    submitDelayMax: 25,    // 提交前最大延迟(秒)
+    answerIntervalMin: 0,  // 每题最小间隔(秒,0=最快)
+    answerIntervalMax: 0,  // 每题最大间隔(秒,0=最快)
+    submitDelayMin: 0,     // 提交前最小延迟(秒,0=最快)
+    submitDelayMax: 0,     // 提交前最大延迟(秒,0=最快)
     minAccuracy: 0.6,      // 最低正确率,低于则暂存不提交
-    quizDelayMin: 3,       // 弹题作答前模拟"读题"的随机等待(秒)
-    quizDelayMax: 8,
+    quizDelayMin: 0,       // 弹题作答前等待(秒,0=最快)
+    quizDelayMax: 0,
     dailyLimitMinutes: 0,   // 每日刷课时长上限(分钟),0 = 不限
-    deliberateErrorRate: 0.08, // 故意答错率 0~0.2(拟人:真人不会全对)
+    deliberateErrorRate: 0, // 故意答错率 0~0.2(0=不故意错)
     aiEnabled: false,      // 启用 DeepSeek AI 答题(需填 key)
     aiKey: '',              // 个人 API Key:点面板 ⚙ 填写(platform.deepseek.com 创建,只存本机)
     aiUrl: 'https://api.deepseek.com/v1/chat/completions',
@@ -971,12 +971,12 @@
         log('DOM侦察: ' + String(container.outerHTML).slice(0, 1500), 'info');
       }
       log(`❓ 检测到视频弹题${fromHeuristic ? '(启发式)' : ''}: ${q.question.slice(0, 40)}...`, 'warn');
-      await randomSleep(CONFIG.quizDelayMin, CONFIG.quizDelayMax); // 拟人:先"读题"几秒再答
+      await sleep(0.2); // 极速:不等待
       const answers = await getAnswers(q);
       const ok = setHeuristicAnswer(answers, q, container);
       recordQuestion(q, answers);  // 收集弹题进题库
       log(ok ? '弹题已作答,继续播放' : '弹题未能作答,尝试直接继续', ok ? 'ok' : 'warn');
-      await randomSleep(2, 4); // 拟人:答完不立刻点继续
+      await sleep(0.3); // 极速:答完立即继续
       // 精确优先:先点"继续学习"(视频弹题专用),再兜底其他常见按钮
       if (!clickButtonByText(win, ['继续学习'])) {
         clickButtonByText(win, ['确定', '提交', '下一题', '关闭', '继续', '我知道了']);
@@ -1099,13 +1099,13 @@
       if (pan && pan.contentWindow) {
         const pw = pan.contentWindow;
         pw.scrollTo(0, pw.document.body.scrollHeight);
-        await randomSleep(3, 6);
+        await sleep(1);
         pw.scrollTo(0, pw.document.body.scrollHeight);
       } else {
         win.scrollTo(0, win.document.body.scrollHeight);
       }
     } catch (e) { /* ignore */ }
-    await randomSleep(4, 8);
+    await sleep(1);
     log('✓ 文档任务处理完成');
   }
 
@@ -1115,11 +1115,11 @@
     const win = iframe.contentWindow;
     try {
       win.scrollTo(0, win.document.body.scrollHeight);
-      await randomSleep(2, 4);
+      await sleep(0.5);
       win.scrollTo(0, 0);
     } catch (e) { /* ignore */ }
     log('🖼 图片任务:已打开并停留查看...', 'ok');
-    await randomSleep(15, 25);
+    await randomSleep(5, 8);
     log('✓ 图片任务处理完成');
   }
 
@@ -1271,7 +1271,7 @@
         const answers = await getAnswers(q);
         const ok = setHeuristicAnswer(answers, q, container);
         log(ok ? '弹题已作答' : '弹题未能作答', ok ? 'ok' : 'warn');
-        await randomSleep(2, 4);
+        await sleep(0.3);
         clickButtonByText(window, ['继续学习', '确定', '提交', '下一题', '关闭', '继续', '我知道了']);
       }
     }
@@ -1336,7 +1336,7 @@
       if (pdfFrame) await pdfTask(pdfFrame);
     }
     // 4) 切下一节
-    await randomSleep(2, 4);
+    await sleep(0.3);
     if (CONFIG.autoJump && clickNextSection()) {
       log('→ 切换到下一节', 'ok');
     } else {
@@ -1401,7 +1401,7 @@
       } catch (e) {
         log(`任务处理异常: ${e.message}`, 'err');
       }
-      await randomSleep(2, 5);
+      await sleep(0.3);
     }
     log(`本章扫描结束(共 ${icons.length} 个任务点)`, 'ok');
     if (CONFIG.autoJump) {
