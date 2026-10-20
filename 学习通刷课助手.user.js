@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         学习通刷课助手
 // @namespace    cx-auto-study
-// @version      1.0.6
+// @version      1.0.7
 // @description  学习通任务点自动完成:视频/音频原速静音连播、自动切章、弹题与章节测验自动答题(字体加密自动解密 + DeepSeek AI 作答)、文档/图片任务处理、拟人化防检测
 // @author       cx-auto-study contributors
 // @license      MIT
@@ -12,8 +12,10 @@
 // @match        *://*.chaoxing.com/*
 // @run-at       document-end
 // @grant        GM_getValue
+// @grant        GM_info
 // @grant        GM_setValue
 // @grant        GM_xmlhttpRequest
+// @connect      127.0.0.1
 // @connect      api.tikuhai.com
 // @connect      cx.icodef.com
 // @connect      tk.enncy.cn
@@ -53,6 +55,7 @@
     aiUrl: 'https://api.deepseek.com/v1/chat/completions',
     aiModel: 'deepseek-reasoner',
     useTiku: false,         // 免费题库站(已停止免费,默认关闭,纯 AI 答题)
+    reportUrl: '',          // 状态上报地址(调试用,留空=关闭);如 http://127.0.0.1:8790/report
   };
 
   function loadConfig() {
@@ -204,6 +207,75 @@
         logsEl.scrollTop = logsEl.scrollHeight;
       }
     }
+    scheduleReport();
+  }
+
+  // ===== 本地状态上报(可选:填了「上报地址」才生效,把页面真实状态推给本机监听程序)=====
+  let lastReportAt = 0;
+  let reportTimer = null;
+  function buildSnapshot() {
+    const v = document.querySelector('video');
+    const jobs = Array.from(document.querySelectorAll('.ans-job-icon'));
+    const statusEl = document.getElementById('cxStatus');
+    return {
+      at: Date.now(),
+      time: new Date().toLocaleString('zh-CN'),
+      version: (typeof GM_info !== 'undefined' && GM_info.script) ? GM_info.script.version : 'unknown',
+      url: location.href,
+      title: document.title,
+      status: statusEl ? statusEl.textContent : '',
+      config: {
+        speed: CONFIG.speed, aiEnabled: CONFIG.aiEnabled, aiModel: CONFIG.aiModel,
+        useTiku: CONFIG.useTiku, dailyLimitMinutes: CONFIG.dailyLimitMinutes,
+        autoSubmit: CONFIG.autoSubmit, autoJump: CONFIG.autoJump,
+        minAccuracy: CONFIG.minAccuracy, deliberateErrorRate: CONFIG.deliberateErrorRate,
+        answerIntervalMin: CONFIG.answerIntervalMin, submitDelayMin: CONFIG.submitDelayMin
+      },
+      video: v ? {
+        cur: Math.round(v.currentTime), dur: Math.round(v.duration) || null,
+        rate: v.playbackRate, paused: v.paused, muted: v.muted
+      } : null,
+      jobsOld: jobs.length ? {
+        total: jobs.length,
+        finished: jobs.filter((e) => e.classList.contains('ans-job-finished')).length
+      } : null,
+      cards: document.querySelectorAll('mooc-ans, .knowledge-card').length,
+      frames: Array.from(document.querySelectorAll('iframe')).map((f) => (f.src || '').slice(0, 120)).slice(0, 12),
+      quiz: {
+        TiMu: document.querySelectorAll('.TiMu').length,
+        questionLi: document.querySelectorAll('.questionLi').length,
+        fontEnc: document.querySelectorAll('.font-cxsecret').length,
+        checked: document.querySelectorAll('input[type=radio]:checked, input[type=checkbox]:checked').length
+      },
+      logs: logLines.slice(-25).map((l) => l.line)
+    };
+  }
+  function pushReport(force) {
+    const url = (CONFIG.reportUrl || '').trim();
+    if (!url) return;
+    const now = Date.now();
+    if (!force && now - lastReportAt < 4000) return;   // 限流:最快 4 秒一次
+    lastReportAt = now;
+    try {
+      GM_xmlhttpRequest({
+        method: 'POST',
+        url: url,
+        data: JSON.stringify(buildSnapshot()),
+        headers: { 'Content-Type': 'application/json' },
+        timeout: 4000,
+        onerror: () => {},
+        ontimeout: () => {}
+      });
+    } catch (e) { /* 上报是可选能力,失败静默 */ }
+  }
+  function scheduleReport() {
+    if (reportTimer) return;
+    reportTimer = setTimeout(() => { reportTimer = null; pushReport(true); }, 800);
+  }
+  function startReporterHeartbeat() {
+    if (!(CONFIG.reportUrl || '').trim()) return;
+    pushReport(true);
+    setInterval(() => pushReport(false), 10000);
   }
 
   function initPanel() {
@@ -342,6 +414,9 @@
       '<div class="field"><div class="label">📖 自动切章</div>' +
         '<input id="cfgJump" type="checkbox" ' + (CONFIG.autoJump ? 'checked' : '') + '>' +
         '<div class="hint">本章任务点全部完成后,自动进入下一章继续刷</div></div>' +
+      '<div class="field"><div class="label">📡 状态上报地址(调试用)</div>' +
+        '<input id="cfgReport" type="text" placeholder="http://127.0.0.1:8790/report" value="' + CONFIG.reportUrl + '">' +
+        '<div class="hint">留空 = 关闭。填入本机监听地址后,脚本会把当前页面状态(视频进度/任务点/题目容器/最近日志)定时推过去,方便本机程序或 AI 直接读真实状态。只发往你自己填的地址,不经过任何第三方服务器</div></div>' +
       '<div class="field"><div class="label">📋 导出已收集题目</div>' +
         '<button id="cfgExport" type="button">复制题目数据</button>' +
         '<div class="hint">把做过的所有题目(题干+选项+答案)复制到剪贴板,可发给 AI 整理成考前手册;也可以拿去做题库备份</div></div>' +
@@ -359,6 +434,7 @@
       CONFIG.dailyLimitMinutes = parseFloat(document.getElementById('cfgDaily').value) || 0;
       CONFIG.autoSubmit = document.getElementById('cfgSubmit').checked;
       CONFIG.autoJump = document.getElementById('cfgJump').checked;
+      CONFIG.reportUrl = document.getElementById('cfgReport').value.trim();
       saveConfig(CONFIG);
       log('配置已保存(倍速 ' + CONFIG.speed + 'x, AI ' + (CONFIG.aiEnabled ? '开' : '关') + ')', 'ok');
       panel.remove();
@@ -1467,6 +1543,7 @@
 
   /* ==================== 路由 ==================== */
   (function main() {
+    startReporterHeartbeat();
     const path = location.pathname;
     const chapterPages = ['/mycourse/studentstudy', '/mooc-ans/mycourse/studentstudy', '/mooc2-ans/mycourse/studentstudy'];
     const homeworkPages = [
