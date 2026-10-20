@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         学习通刷课助手
 // @namespace    cx-auto-study
-// @version      1.0.8
+// @version      1.0.9
 // @description  学习通任务点自动完成:视频/音频原速静音连播、自动切章、弹题与章节测验自动答题(字体加密自动解密 + DeepSeek AI 作答)、文档/图片任务处理、拟人化防检测
 // @author       cx-auto-study contributors
 // @license      MIT
@@ -213,6 +213,10 @@
   // ===== 本地状态上报(可选:填了「上报地址」才生效,把页面真实状态推给本机监听程序)=====
   let lastReportAt = 0;
   let reportTimer = null;
+  function scriptVersion() {
+    try { if (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) return GM_info.script.version; } catch (e) { /* ignore */ }
+    return 'unknown';
+  }
   function buildSnapshot() {
     const v = document.querySelector('video');
     const jobs = Array.from(document.querySelectorAll('.ans-job-icon'));
@@ -220,7 +224,7 @@
     return {
       at: Date.now(),
       time: new Date().toLocaleString('zh-CN'),
-      version: (typeof GM_info !== 'undefined' && GM_info.script) ? GM_info.script.version : 'unknown',
+      version: scriptVersion(),
       url: location.href,
       title: document.title,
       status: statusEl ? statusEl.textContent : '',
@@ -247,7 +251,39 @@
         fontEnc: document.querySelectorAll('.font-cxsecret').length,
         checked: document.querySelectorAll('input[type=radio]:checked, input[type=checkbox]:checked').length
       },
-      logs: logLines.slice(-25).map((l) => l.line)
+      logs: logLines.slice(-25).map((l) => l.line),
+      diag: (function () {
+        try {
+          const li = document.querySelector('.questionLi') || document.querySelector('.TiMu');
+          if (!li) return null;
+          const ti = li.querySelector('input[name^=answertype]');
+          const ue = (typeof window.UE !== 'undefined') ? window.UE : null;
+          const keys = (ue && ue.instants) ? Object.keys(ue.instants) : null;
+          let ueLen = null;
+          try {
+            if (keys && keys.length) {
+              const ed = ue.instants[keys[0]];
+              if (ed && typeof ed.getContent === 'function') ueLen = String(ed.getContent()).replace(/<[^>]*>/g, '').length;
+            }
+          } catch (e) { /* ignore */ }
+          return {
+            answertype: ti ? ti.value : null,
+            textareas: Array.from(li.querySelectorAll('textarea')).map((t) => ({
+              id: t.id || null, name: t.name || null,
+              hidden: (t.offsetParent === null), cls: (t.className || '').slice(0, 40)
+            })),
+            iframes: Array.from(li.querySelectorAll('iframe')).map((f) => ({
+              id: f.id || null, cls: (f.className || '').slice(0, 40),
+              sameOrigin: (function () { try { return !!f.contentDocument; } catch (e) { return false; } })()
+            })),
+            editables: li.querySelectorAll('[contenteditable="true"]').length,
+            hasUE: !!ue,
+            ueInstants: keys,
+            ueContentLen: ueLen,
+            optionInputs: li.querySelectorAll('input[type=radio], input[type=checkbox]').length
+          };
+        } catch (e) { return { error: String(e && e.message) }; }
+      })()
     };
   }
   function pushReport(force) {
@@ -318,6 +354,7 @@
       '#cxCfgPanel button#cfgClose:active{background:linear-gradient(rgba(0,0,0,0.12),rgba(0,0,0,0.12)),linear-gradient(rgba(240,155,196,0.4),rgba(228,145,184,0.32))}';
     document.head.appendChild(style);
     document.body.appendChild(logPanel);
+    log('刷课助手 v' + scriptVersion() + ' 已加载(看这一行确认版本)');
     document.getElementById('cxCfgBtn').addEventListener('click', showConfigUI);
     document.getElementById('cxRunBtn').addEventListener('click', togglePause);
     // 展开/收起日志(小按钮,表头其余区域留给拖拽)
@@ -1399,7 +1436,8 @@
       const answers = await getAnswers(q);
       const ok = setQuizAnswer(answers, q, els[i], window);
       if (ok) okCount++;
-      log(`第 ${i + 1}/${els.length} 题 ${ok ? '✓ 已作答(已回读校验)' : '✗ 写入失败或无可匹配答案(请手动填)'}`, ok ? 'ok' : 'warn');
+      const size = (answers || []).join('').length;
+      log(`第 ${i + 1}/${els.length} 题 ${ok ? `✓ 已作答(回读校验通过, ${size} 字)` : `✗ 写入失败或无可匹配答案(收到 ${size} 字)`}`, ok ? 'ok' : 'warn');
     }
     log(`作业填写完成(${okCount}/${els.length}),请人工检查后手动提交`);
   }
