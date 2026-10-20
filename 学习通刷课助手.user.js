@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         学习通刷课助手
 // @namespace    cx-auto-study
-// @version      1.0.9
+// @version      1.0.10
 // @description  学习通任务点自动完成:视频/音频原速静音连播、自动切章、弹题与章节测验自动答题(字体加密自动解密 + DeepSeek AI 作答)、文档/图片任务处理、拟人化防检测
 // @author       cx-auto-study contributors
 // @license      MIT
@@ -855,18 +855,38 @@
   function collectTextTargets(el) {
     const rich = [];   // 富文本(iframe body / contenteditable)
     const plain = [];  // textarea / 单行 input
-    Array.from(el.querySelectorAll('iframe')).forEach((f) => {
+    const seen = new Set();
+    const pushRich = (doc, node) => {
+      if (!node || seen.has(node)) return;
+      seen.add(node);
+      rich.push({ kind: 'rich', doc, node });
+    };
+    const scanFrames = (root) => Array.from(root.querySelectorAll('iframe')).forEach((f) => {
       try {
         const doc = f.contentDocument;
         if (!doc || !doc.body) return;
-        if (isRichHost(doc.body, f)) rich.push({ kind: 'rich', doc, node: doc.body });
+        if (isRichHost(doc.body, f)) pushRich(doc, doc.body);
       } catch (e) { /* 跨域跳过 */ }
     });
-    Array.from(el.querySelectorAll('[contenteditable="true"], [contenteditable=""]')).forEach((n) => {
-      if (!rich.some((r) => r.node === n)) rich.push({ kind: 'rich', doc: n.ownerDocument, node: n });
+    scanFrames(el);
+    Array.from(el.querySelectorAll('[contenteditable="true"], [contenteditable=""]')).forEach((n) => pushRich(n.ownerDocument, n));
+    // 有的页面把编辑器渲染在题目容器之外 → 扩大到整页再找一次
+    if (!rich.length) {
+      scanFrames(document);
+      Array.from(document.querySelectorAll('[contenteditable="true"], .edui-body, .ql-editor, .w-e-text, .cke_editable')).forEach((n) => pushRich(n.ownerDocument, n));
+    }
+    const pushPlain = (n) => plain.push({
+      kind: (n.tagName || '').toLowerCase() === 'textarea' ? 'textarea' : 'input',
+      doc: n.ownerDocument,
+      node: n,
+      hidden: n.offsetParent === null
     });
-    Array.from(el.querySelectorAll('textarea')).forEach((n) => plain.push({ kind: 'textarea', doc: n.ownerDocument, node: n }));
-    Array.from(el.querySelectorAll('input[type=text], input:not([type])')).forEach((n) => plain.push({ kind: 'input', doc: n.ownerDocument, node: n }));
+    Array.from(el.querySelectorAll('textarea')).forEach(pushPlain);
+    Array.from(el.querySelectorAll('input[type=text], input:not([type])')).forEach(pushPlain);
+    if (!plain.length) {
+      Array.from(document.querySelectorAll('textarea')).forEach(pushPlain);
+      Array.from(document.querySelectorAll('.questionLi input[type=text], .TiMu input[type=text]')).forEach(pushPlain);
+    }
     return { rich, plain };
   }
   function writeRich(t, text) {
@@ -892,63 +912,70 @@
       node.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
     } catch (e) { /* ignore */ }
   }
+  function stripTags(s) { return String(s || '').replace(/<[^>]*>/g, '').replace(/&nbsp;/g, ' ').replace(/\s+/g, ''); }
+  // UEditor 官方 API:能同步编辑器内部状态(提交时才带得走)
+  function tryUE(win, text, need) {
+    try {
+      const UE = win && win.UE;
+      if (!UE || !UE.instants) return false;
+      return Object.keys(UE.instants).some((k) => {
+        const ed = UE.instants[k];
+        if (!ed || typeof ed.setContent !== 'function') return false;
+        if (typeof ed.getContent === 'function') {
+          const cur = stripTags(ed.getContent());
+          if (cur.length >= need(text) && cur.indexOf(text.slice(0, 6)) >= 0) return true;  // 已经写好了
+        }
+        ed.setContent(text);
+        return typeof ed.getContent === 'function' && stripTags(ed.getContent()).length >= need(text);
+      });
+    } catch (e) { return false; }
+  }
+  function setPlain(t, val) {
+    try {
+      t.node.value = val;
+      t.node.dispatchEvent(new Event('input', { bubbles: true }));
+      t.node.dispatchEvent(new Event('change', { bubbles: true }));
+      t.node.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
+    } catch (e) { /* ignore */ }
+    return textValueOf(t.node).length >= Math.min(6, val.length);
+  }
   function fillTextAnswer(el, answerArr, win) {
     const texts = (answerArr || []).map((a) => cl(clean(String(a == null ? '' : a)).replace(/^第.空[:：]?/, ''))).filter(Boolean);
     if (!texts.length) return false;
-    const { rich, plain } = collectTextTargets(el);
     const need = (t) => Math.min(6, t.length);
 
-    // ① 富文本优先(简答题/UEditor):先用 UEditor 官方 API 写(能同步编辑器内部状态),失败再逐层注入
-    try {
-      const UE = win && win.UE;
-      if (UE && UE.instants) {
-        const ueOk = Object.keys(UE.instants).some((k) => {
-          const ed = UE.instants[k];
-          if (!ed || typeof ed.setContent !== 'function') return false;
-          ed.setContent(texts[0]);
-          const got = String((ed.getContent && ed.getContent()) || '').replace(/<[^>]*>/g, '');
-          return got.replace(/\s+/g, '').length >= need(texts[0]);
-        });
-        if (ueOk) return true;
-      }
-    } catch (e) { /* ignore */ }
+    // ① UEditor 官方 API 最优先(能同步编辑器内部状态,提交时带得走)
+    if (tryUE(win, texts[0], need)) return true;
+
+    const { rich, plain } = collectTextTargets(el);
+
+    // ② 富文本容器注入(iframe body / contenteditable)
     for (const t of rich) {
       writeRich(t, texts[0]);
       if (textValueOf(t.node).length >= need(texts[0])) return true;
     }
-    // ② 多空填空:每个框填一份
-    if (plain.length && plain.length > 1 && texts.length > 1) {
+
+    // ③ 可见文本框:多空填空逐框填,单框填整段
+    const vis = plain.filter((t) => !t.hidden);
+    if (vis.length > 1 && texts.length > 1) {
       let filled = 0;
-      plain.forEach((t, i) => {
-        const val = texts[i] != null ? texts[i] : texts[0];
-        try {
-          t.node.value = val;
-          t.node.dispatchEvent(new Event('input', { bubbles: true }));
-          t.node.dispatchEvent(new Event('change', { bubbles: true }));
-          t.node.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
-        } catch (e) { /* ignore */ }
-        if (textValueOf(t.node).length >= need(val)) filled++;
-      });
+      vis.forEach((t, i) => { if (setPlain(t, texts[i] != null ? texts[i] : texts[0])) filled++; });
       if (filled) return true;
     }
-    // ③ 单框填空
-    for (const t of plain) {
-      try {
-        t.node.value = texts[0];
-        t.node.dispatchEvent(new Event('input', { bubbles: true }));
-        t.node.dispatchEvent(new Event('change', { bubbles: true }));
-        t.node.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
-      } catch (e) { /* ignore */ }
-      if (textValueOf(t.node).length >= need(texts[0])) return true;
-      // UEditor API 兜底:hidden textarea 有 name,可用 UE.getEditor(name).setContent
+    for (const t of vis) {
+      if (setPlain(t, texts[0])) return true;
+    }
+
+    // ④ 隐藏 textarea 兜底:只写值不算成功,必须 UE API 能回读确认
+    for (const t of plain.filter((x) => x.hidden)) {
+      setPlain(t, texts[0]);
       try {
         const name = t.node.getAttribute && t.node.getAttribute('name');
         if (name && win && win.UE && typeof win.UE.getEditor === 'function') {
           const ed = win.UE.getEditor(name);
           if (ed && typeof ed.setContent === 'function') {
             ed.setContent(texts[0]);
-            const got = (ed.getContent && ed.getContent()) || '';
-            if (String(got).replace(/<[^>]*>/g, '').length >= need(texts[0])) return true;
+            if (stripTags(ed.getContent && ed.getContent()).length >= need(texts[0])) return true;
           }
         }
       } catch (e) { /* ignore */ }
