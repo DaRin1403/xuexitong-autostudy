@@ -2127,6 +2127,85 @@
   }
 
   // 扫描并执行当前激活卡片标签页内的所有任务点
+  async function newChapterLoop(cardsWin, startUrl = '') {
+    log('🧭 检测到无传统任务点图标,尝试新版卡片或问卷/文本页适配...', 'info');
+    const limitHit = () => {
+      try {
+        const txt = String(document.body ? document.body.textContent : '') + ' ' + String(cardsWin.document.body ? cardsWin.document.body.textContent : '');
+        return txt.includes('今日视频任务点完成数已达上限');
+      } catch (e) { return false; }
+    };
+    if (limitHit()) {
+      log('⏹ 平台提示:今日视频任务点已达上限,跳过视频任务(明天恢复),只处理学习检测', 'warn');
+    }
+
+    await topLevelQuiz();
+    if (!isCardContextAlive(cardsWin, startUrl)) return;
+
+    // 1) 检查是否有新版「学习检测 / 学习测验」标签
+    if (CONFIG.autoWork) {
+      const tabClicked = clickByText(cardsWin, ['学习检测', '学习测验']);
+      if (tabClicked) {
+        await sleep(2);
+        let workFrame = null;
+        for (let i = 0; i < 15 && !workFrame; i++) {
+          if (!isCardContextAlive(cardsWin, startUrl)) return;
+          const fs = Array.from(cardsWin.document.querySelectorAll('iframe'));
+          workFrame = fs.find((f) => /\/ananas\/modules\/work\//.test(String(f.src || ''))) || null;
+          if (!workFrame) await sleep(1);
+        }
+        if (workFrame) {
+          await workTask(workFrame, cardsWin);
+          log('✓ 学习检测处理结束', 'ok');
+        } else {
+          await topLevelQuiz();
+        }
+      }
+    }
+
+    // 2) 检查是否存在视频/图片/文档模块 iframe(最多等待 3 秒,避免在问卷/纯文本页空等 20 秒)
+    let allFrames = [];
+    for (let i = 0; i < 3; i++) {
+      if (!isCardContextAlive(cardsWin, startUrl)) return;
+      try { allFrames = Array.from(cardsWin.document.querySelectorAll('iframe')); } catch (e) { allFrames = []; }
+      if (allFrames.length > 0) break;
+      await sleep(1);
+    }
+
+    if (!allFrames.length) {
+      log('ℹ 当前小节无内嵌任务模块(如评估问卷/导读页),直接跳过', 'ok');
+      return;
+    }
+
+    // 3) 视频模块处理
+    if (!limitHit() && CONFIG.autoVideo) {
+      const videoFrame = allFrames.find((f) => /\/ananas\/modules\/video\//.test(String(f.src || '')));
+      if (videoFrame) {
+        await videoTask(videoFrame, cardsWin, videoFrame.parentElement, false);
+        if (!isCardContextAlive(cardsWin, startUrl, videoFrame)) return;
+        await sleep(2.5);
+        if (!isTaskFinished(videoFrame.parentElement, videoFrame)) {
+          log('⚠ 视频任务点尚未标记完成,启动保底策略完整重播一次...', 'warn');
+          await videoTask(videoFrame, cardsWin, videoFrame.parentElement, true);
+          if (!isCardContextAlive(cardsWin, startUrl, videoFrame)) return;
+          await sleep(2.5);
+          if (!isTaskFinished(videoFrame.parentElement, videoFrame)) {
+            setStatus('工作中(有未完成警告)', true);
+            log('❌ [未完成警告] 当前小节视频任务点重试后仍未完成!已跳过并继续运行', 'err');
+          }
+        }
+      }
+    }
+
+    // 4) 图片与 PDF 模块处理
+    const imgFrame = allFrames.find((f) => /\/ananas\/modules\/(img|image|picture)\//.test(String(f.src || '')));
+    if (imgFrame && isCardContextAlive(cardsWin, startUrl)) await imageTask(imgFrame);
+
+    const pdfFrame = allFrames.find((f) => /\/ananas\/modules\/pdf\//.test(String(f.src || '')));
+    if (pdfFrame && isCardContextAlive(cardsWin, startUrl)) await pdfTask(pdfFrame);
+  }
+
+  // 扫描并执行当前激活卡片标签页内的所有任务点
   async function processCurrentCardTab() {
     await waitElementLoaded(window, '#iframe', 30000);
     const cardsIframe = document.querySelector('#iframe');
@@ -2144,7 +2223,7 @@
     const icons = cardsWin.document.querySelectorAll('.ans-job-icon');
     if (!icons.length) {
       log('当前卡片未找到传统任务点图标,尝试新版知识卡片模式处理...', 'info');
-      await newChapterLoop(cardsWin);
+      await newChapterLoop(cardsWin, startUrl);
       return cardsWin;
     }
     for (const icon of Array.from(icons)) {
@@ -2192,7 +2271,7 @@
       await sleep(0.5);
       if (await clickNextSection(lastCardsWin)) {
         log('→ 本小节全部标签页已处理完毕,切换到下一章/下一节', 'ok');
-        return true; // 通知 startWatch 已触发切章,重置 URL 监听以自动启动新章节
+        return true; 
       } else {
         log('未找到下一章按钮(可能已是最后一章)', 'warn');
       }
@@ -2222,8 +2301,7 @@
           } catch (e) {
             log('主循环异常: ' + e.message, 'err');
           }
-          if (jumpedToNext) {
-            // 已点击切换到下一章:等待新章节 iframe 加载并清空 lastIframeUrl,确保下一轮立即自动接管新章节
+          if (jumpedToNext) {      
             await sleep(2);
             lastIframeUrl = '';
           }
