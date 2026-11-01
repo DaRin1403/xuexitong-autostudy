@@ -1,14 +1,12 @@
 // ==UserScript==
 // @name         学习通刷课助手
 // @namespace    cx-auto-study
-// @version      1.0.10
-// @description  学习通任务点自动完成:视频/音频原速静音连播、自动切章、弹题与章节测验自动答题(字体加密自动解密 + DeepSeek AI 作答)、文档/图片任务处理、拟人化防检测
+// @version      1.0.11
+// @description  学习通任务点自动完成:视频/音频静音连播、智能进度条拖动、同节多标签页遍历、弹题与测验自动答题(内置TTF字形解密 + 多平台AI作答)、二次弹窗安全确认、任务点完成检测与保底重试
 // @author       cx-auto-study contributors
 // @license      MIT
 // @homepageURL  https://github.com/DaRin1403/xuexitong-autostudy
 // @supportURL   https://github.com/DaRin1403/xuexitong-autostudy/issues
-// @updateURL    https://cdn.jsdelivr.net/gh/DaRin1403/xuexitong-autostudy@main/%E5%AD%A6%E4%B9%A0%E9%80%9A%E5%88%B7%E8%AF%BE%E5%8A%A9%E6%89%8B.user.js
-// @downloadURL  https://cdn.jsdelivr.net/gh/DaRin1403/xuexitong-autostudy@main/%E5%AD%A6%E4%B9%A0%E9%80%9A%E5%88%B7%E8%AF%BE%E5%8A%A9%E6%89%8B.user.js
 // @match        *://*.chaoxing.com/*
 // @run-at       document-end
 // @grant        GM_getValue
@@ -21,41 +19,66 @@
 // @connect      tk.enncy.cn
 // @connect      api.muketool.com
 // @connect      api.deepseek.com
+// @connect      api.siliconflow.cn
+// @connect      api.minimaxi.com
+// @connect      open.bigmodel.cn
+// @connect      dashscope.aliyuncs.com
+// @connect      api.moonshot.cn
+// @connect      api.openai.com
+// @connect      www.forestpolice.org
 // @connect      cdn.jsdelivr.net
+// @connect      *
 // @noframes
 // ==/UserScript==
-//
-// ⚠️ 免责声明
-// 本脚本仅供个人学习辅助与技术研究使用。使用本脚本可能违反学习通(超星)平台服务条款,
-// 平台已声明使用人工智能等技术监控"刷课"行为并可能通报所在高校。请自行评估风险,
-// 合理设置(原速、每日上限、拟人化),使用产生的一切后果由使用者自行承担。
 
 (function () {
   'use strict';
 
+  /* ==================== AI 平台预设 ==================== */
+  const PROVIDERS = {
+    deepseek: { name: 'DeepSeek', url: 'https://api.deepseek.com/v1/chat/completions', model: 'deepseek-chat' },
+    siliconflow: { name: '硅基流动', url: 'https://api.siliconflow.cn/v1/chat/completions', model: 'deepseek-ai/DeepSeek-V3' },
+    minimax: { name: 'MiniMax', url: 'https://api.minimaxi.com/v1/chat/completions', model: 'MiniMax-Text-01' },
+    zhipu: { name: '智谱 AI', url: 'https://open.bigmodel.cn/api/paas/v4/chat/completions', model: 'glm-4-plus' },
+    qwen: { name: '通义千问', url: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions', model: 'qwen-plus' },
+    kimi: { name: 'Kimi', url: 'https://api.moonshot.cn/v1/chat/completions', model: 'moonshot-v1-8k' },
+    openai: { name: 'OpenAI', url: 'https://api.openai.com/v1/chat/completions', model: 'gpt-4o-mini' },
+    custom: { name: '自定义', url: '', model: '' }
+  };
+
+  function inferProviderFromUrl(url) {
+    const u = String(url || '').trim();
+    for (const [k, v] of Object.entries(PROVIDERS)) {
+      if (k !== 'custom' && v.url && u.startsWith(v.url.replace(/\/chat\/completions$/, ''))) return k;
+    }
+    return u ? 'custom' : 'deepseek';
+  }
+
   /* ==================== 配置 ==================== */
   const DEFAULT_CONFIG = {
-    speed: 2,              // 视频倍速(默认 2x 最快;1 = 原速最安全,2x 检测风险最高,自行权衡)
-    autoVideo: true,       // 自动处理视频任务
-    autoAudio: true,       // 自动处理音频任务
-    autoWork: true,        // 自动做章节测验
-    autoSubmit: true,      // 正确率达标自动提交测验
-    autoJump: true,        // 本章完成后自动切下一章
-    answerIntervalMin: 0,  // 每题最小间隔(秒,0=最快)
-    answerIntervalMax: 0,  // 每题最大间隔(秒,0=最快)
-    submitDelayMin: 0,     // 提交前最小延迟(秒,0=最快)
-    submitDelayMax: 0,     // 提交前最大延迟(秒,0=最快)
-    minAccuracy: 0.6,      // 最低正确率,低于则暂存不提交
-    quizDelayMin: 0,       // 弹题作答前等待(秒,0=最快)
+    speed: 2,                  // 视频倍速(默认 2x 最快;1 = 原速最安全)
+    dragVideoProgress: false,  // 拖动视频进度条(仅对完成条件为时长>90%且未禁拖拽的视频生效)
+    autoVideo: true,           // 自动处理视频任务
+    autoAudio: true,           // 自动处理音频任务
+    autoWork: true,            // 自动做章节测验
+    autoSubmit: true,          // 作答覆盖率达标自动提交测验
+    autoJump: true,            // 本章完成后自动切下一章(含同小节多标签页遍历)
+    answerIntervalMin: 0,      // 每题最小间隔(秒,0=最快)
+    answerIntervalMax: 0,      // 每题最大间隔(秒,0=最快)
+    submitDelayMin: 0,         // 提交前最小延迟(秒,0=最快)
+    submitDelayMax: 0,         // 提交前最大延迟(秒,0=最快)
+    minAccuracy: 0.6,          // 最低作答覆盖率,低于则暂存不提交
+    quizDelayMin: 0,           // 弹题作答前等待(秒,0=最快)
     quizDelayMax: 0,
-    dailyLimitMinutes: 0,   // 每日刷课时长上限(分钟),0 = 不限
-    deliberateErrorRate: 0, // 故意答错率 0~0.2(0=不故意错)
-    aiEnabled: false,      // 启用 DeepSeek AI 答题(需填 key)
-    aiKey: '',              // 个人 API Key:点面板 ⚙ 填写(platform.deepseek.com 创建,只存本机)
+    dailyLimitMinutes: 0,      // 每日刷课时长上限(分钟),0 = 不限
+    deliberateErrorRate: 0,    // 故意答错率 0~0.2(0=不故意错)
+    aiEnabled: false,          // 启用 AI 答题(需填 key)
+    aiProvider: 'deepseek',    // 当前选择的 AI 平台
+    aiKey: '',                 // 个人 API Key:点面板 ⚙ 填写(只存本机)
     aiUrl: 'https://api.deepseek.com/v1/chat/completions',
-    aiModel: 'deepseek-reasoner',
-    useTiku: false,         // 免费题库站(已停止免费,默认关闭,纯 AI 答题)
-    reportUrl: '',          // 状态上报地址(调试用,留空=关闭);如 http://127.0.0.1:8790/report
+    aiModel: 'deepseek-chat',
+    useTiku: false,            // 免费题库站(默认关闭,纯 AI 答题)
+    reportUrl: '',             // 状态上报地址(调试用,留空=关闭)
   };
 
   function loadConfig() {
@@ -63,7 +86,13 @@
       const saved = (typeof GM_getValue !== 'undefined')
         ? GM_getValue('cxConfig', null)
         : JSON.parse(localStorage.getItem('cxConfig') || 'null');
-      if (saved && typeof saved === 'object') return Object.assign({}, DEFAULT_CONFIG, saved);
+      if (saved && typeof saved === 'object') {
+        const cfg = Object.assign({}, DEFAULT_CONFIG, saved);
+        if (!saved.aiProvider || !PROVIDERS[saved.aiProvider]) {
+          cfg.aiProvider = inferProviderFromUrl(cfg.aiUrl);
+        }
+        return cfg;
+      }
     } catch (e) { /* ignore */ }
     return Object.assign({}, DEFAULT_CONFIG);
   }
@@ -74,7 +103,6 @@
     } catch (e) { /* ignore */ }
   }
   let CONFIG = loadConfig();
-  // 一次性迁移(v1.0.6):旧存储的 240 分钟上限 / 1x 倍速 强制升级为新默认(0 不限 + 2x)
   try {
     const MIG = 'cxMigV105';
     const done = (typeof GM_getValue !== 'undefined') ? GM_getValue(MIG, false) : localStorage.getItem(MIG);
@@ -86,9 +114,9 @@
       else localStorage.setItem(MIG, '1');
     }
   } catch (e) { /* ignore */ }
-  if (CONFIG.speed > 2) { CONFIG.speed = 2; }  // 倍速上限 2x
+  if (CONFIG.speed > 2) { CONFIG.speed = 2; }
 
-  /* 题目收集器:做过的题(题干+选项+答案)自动积累,导出后交给 AI 整理成考前手册 */
+  /* 题目收集器 */
   let COLLECTED = [];
   try {
     COLLECTED = (typeof GM_getValue !== 'undefined')
@@ -152,7 +180,6 @@
     });
   }
 
-  // HTML 转纯文本(保留 img/sub/sup/br)
   function clean(html) {
     if (html == null) return '';
     return String(html)
@@ -162,10 +189,8 @@
       .replace(/<br\s*\/?>/gi, '\n')
       .trim();
   }
-  // 去题型前缀【单选题】和分值后缀(2.0分)
-  const cl = (str) => String(str).replace(/^【.*?】\s*/, '').replace(/\s*（\d+(\.\d+)?分）$/, '');
+  const cl = (str) => String(str).replace(/^【.*?】\s*/, '').replace(/\s*[（(]\d+(\.\d+)?分[）)]$/, '');
 
-  // 跨域请求:油猴环境用 GM_xmlhttpRequest,普通环境降级 fetch
   function cxFetch(url, { method = 'GET', data = null, headers = {}, timeout = 10000 } = {}) {
     return new Promise((resolve, reject) => {
       if (typeof GM_xmlhttpRequest !== 'undefined') {
@@ -185,12 +210,15 @@
   let logPanel = null;
   let logLines = [];
 
-  function setStatus(text) {
+  function setStatus(text, isWarn = false) {
     const el = document.getElementById('cxStatus');
-    if (el) el.textContent = text;
-    // 状态文字右侧按钮:工作中(未暂停)→ 停止;待机/已暂停 → 开始
+    if (el) {
+      el.textContent = text;
+      el.style.color = isWarn ? '#dc2626' : '#15803d';
+      el.style.fontWeight = isWarn ? '700' : '400';
+    }
     const btn = document.getElementById('cxRunBtn');
-    if (btn) btn.textContent = (text === '工作中' && !PAUSED) ? '⏸' : '▶';
+    if (btn) btn.textContent = (text.startsWith('工作中') && !PAUSED) ? '⏸' : '▶';
   }
 
   function log(msg, level = 'info') {
@@ -210,12 +238,11 @@
     scheduleReport();
   }
 
-  // ===== 本地状态上报(可选:填了「上报地址」才生效,把页面真实状态推给本机监听程序)=====
   let lastReportAt = 0;
   let reportTimer = null;
   function scriptVersion() {
     try { if (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) return GM_info.script.version; } catch (e) { /* ignore */ }
-    return 'unknown';
+    return '1.0.11';
   }
   function buildSnapshot() {
     const v = document.querySelector('video');
@@ -229,7 +256,8 @@
       title: document.title,
       status: statusEl ? statusEl.textContent : '',
       config: {
-        speed: CONFIG.speed, aiEnabled: CONFIG.aiEnabled, aiModel: CONFIG.aiModel,
+        speed: CONFIG.speed, dragVideoProgress: CONFIG.dragVideoProgress,
+        aiEnabled: CONFIG.aiEnabled, aiProvider: CONFIG.aiProvider, aiModel: CONFIG.aiModel,
         useTiku: CONFIG.useTiku, dailyLimitMinutes: CONFIG.dailyLimitMinutes,
         autoSubmit: CONFIG.autoSubmit, autoJump: CONFIG.autoJump,
         minAccuracy: CONFIG.minAccuracy, deliberateErrorRate: CONFIG.deliberateErrorRate,
@@ -251,46 +279,14 @@
         fontEnc: document.querySelectorAll('.font-cxsecret').length,
         checked: document.querySelectorAll('input[type=radio]:checked, input[type=checkbox]:checked').length
       },
-      logs: logLines.slice(-25).map((l) => l.line),
-      diag: (function () {
-        try {
-          const li = document.querySelector('.questionLi') || document.querySelector('.TiMu');
-          if (!li) return null;
-          const ti = li.querySelector('input[name^=answertype]');
-          const ue = (typeof window.UE !== 'undefined') ? window.UE : null;
-          const keys = (ue && ue.instants) ? Object.keys(ue.instants) : null;
-          let ueLen = null;
-          try {
-            if (keys && keys.length) {
-              const ed = ue.instants[keys[0]];
-              if (ed && typeof ed.getContent === 'function') ueLen = String(ed.getContent()).replace(/<[^>]*>/g, '').length;
-            }
-          } catch (e) { /* ignore */ }
-          return {
-            answertype: ti ? ti.value : null,
-            textareas: Array.from(li.querySelectorAll('textarea')).map((t) => ({
-              id: t.id || null, name: t.name || null,
-              hidden: (t.offsetParent === null), cls: (t.className || '').slice(0, 40)
-            })),
-            iframes: Array.from(li.querySelectorAll('iframe')).map((f) => ({
-              id: f.id || null, cls: (f.className || '').slice(0, 40),
-              sameOrigin: (function () { try { return !!f.contentDocument; } catch (e) { return false; } })()
-            })),
-            editables: li.querySelectorAll('[contenteditable="true"]').length,
-            hasUE: !!ue,
-            ueInstants: keys,
-            ueContentLen: ueLen,
-            optionInputs: li.querySelectorAll('input[type=radio], input[type=checkbox]').length
-          };
-        } catch (e) { return { error: String(e && e.message) }; }
-      })()
+      logs: logLines.slice(-25).map((l) => l.line)
     };
   }
   function pushReport(force) {
     const url = (CONFIG.reportUrl || '').trim();
     if (!url) return;
     const now = Date.now();
-    if (!force && now - lastReportAt < 4000) return;   // 限流:最快 4 秒一次
+    if (!force && now - lastReportAt < 4000) return;
     lastReportAt = now;
     try {
       GM_xmlhttpRequest({
@@ -302,7 +298,7 @@
         onerror: () => {},
         ontimeout: () => {}
       });
-    } catch (e) { /* 上报是可选能力,失败静默 */ }
+    } catch (e) { /* ignore */ }
   }
   function scheduleReport() {
     if (reportTimer) return;
@@ -315,7 +311,11 @@
   }
 
   function initPanel() {
-    if (logPanel) return;
+    if (logPanel && document.getElementById('cx-panel')) return;
+    if (!document.body) {
+      window.addEventListener('DOMContentLoaded', initPanel, { once: true });
+      return;
+    }
     logPanel = document.createElement('div');
     logPanel.id = 'cx-panel';
     logPanel.innerHTML =
@@ -323,20 +323,19 @@
       '<div id="cxLogs"></div>';
     const style = document.createElement('style');
     style.textContent =
-      // ===== Kaguya 主题(樱花粉 × 液态玻璃)=====
-      '#cx-panel{position:fixed;right:16px;bottom:16px;width:360px;max-height:280px;overflow:hidden;background:linear-gradient(rgba(252,232,243,0.97),rgba(248,224,238,0.94));color:#3b3b43;border:1px solid rgba(255,255,255,0.6);border-radius:12px;font:12px/1.6 "Microsoft YaHei",sans-serif;z-index:2147483647;box-shadow:inset 0 1px 0 rgba(255,255,255,0.85),0 8px 32px rgba(160,60,120,0.22);backdrop-filter:blur(14px) saturate(160%)}' +
+      '#cx-panel{position:fixed;right:16px;bottom:16px;width:370px;max-height:290px;overflow:hidden;background:linear-gradient(rgba(252,232,243,0.97),rgba(248,224,238,0.94));color:#3b3b43;border:1px solid rgba(255,255,255,0.6);border-radius:12px;font:12px/1.6 "Microsoft YaHei",sans-serif;z-index:2147483647;box-shadow:inset 0 1px 0 rgba(255,255,255,0.85),0 8px 32px rgba(160,60,120,0.22);backdrop-filter:blur(14px) saturate(160%)}' +
       '#cxTitle{padding:8px 12px;font-weight:600;cursor:move;display:flex;gap:8px;align-items:center;color:#3b3b43;background:linear-gradient(rgba(238,161,195,0.82),rgba(228,146,184,0.68));border-bottom:1px solid rgba(255,255,255,0.6);box-shadow:inset 0 1px 0 rgba(255,255,255,0.85);user-select:none}' +
       '#cxStatus{color:#15803d;font-weight:400}' +
       '#cxRunBtn,#cxToggleBtn,#cxCfgBtn{cursor:pointer;font-size:13px;color:#fff;background:linear-gradient(rgba(238,120,180,0.72),rgba(224,100,165,0.55));border:1px solid rgba(255,255,255,0.55);border-radius:8px;padding:2px 8px;line-height:1.4;box-shadow:0 3px 10px rgba(200,110,155,0.3);transition:box-shadow .15s}' +
       '#cxRunBtn:hover,#cxToggleBtn:hover,#cxCfgBtn:hover{background:linear-gradient(rgba(236,90,163,0.95),rgba(224,80,152,0.85))}' +
       '#cxRunBtn:active,#cxToggleBtn:active,#cxCfgBtn:active{background:linear-gradient(rgba(0,0,0,0.12),rgba(0,0,0,0.12)),linear-gradient(rgba(236,90,163,0.95),rgba(224,80,152,0.85));box-shadow:inset 0 2px 4px rgba(150,30,90,0.3)}' +
       '#cxCfgBtn{margin-left:auto}' +
-      '#cxLogs{padding:0 12px 8px;overflow-y:auto;max-height:220px}' +
+      '#cxLogs{padding:0 12px 8px;overflow-y:auto;max-height:230px}' +
       '#cxLogs div{color:#6b6670;margin:2px 0;border-left:3px solid rgba(228,146,184,0.5);padding-left:6px;word-break:break-all}' +
       '#cxLogs div.ok{border-color:#16a34a;color:#15803d}' +
       '#cxLogs div.warn{border-color:#d97706;color:#b45309}' +
-      '#cxLogs div.err{border-color:#dc2626;color:#b91c1c}' +
-      '#cxCfgPanel{position:fixed;right:16px;bottom:8px;width:400px;max-height:82vh;overflow-y:auto;background:linear-gradient(rgba(252,228,240,0.88),rgba(247,215,232,0.72));color:#3b3b43;border:1px solid rgba(255,255,255,0.6);border-radius:12px;padding:12px;z-index:2147483647;font:13px/1.5 "Microsoft YaHei";box-shadow:inset 0 1px 0 rgba(255,255,255,0.85),0 8px 32px rgba(160,60,120,0.22);backdrop-filter:blur(14px) saturate(160%)}' +
+      '#cxLogs div.err{border-color:#dc2626;color:#dc2626;font-weight:600;background:rgba(254,226,226,0.65);border-radius:4px;padding:2px 6px}' +
+      '#cxCfgPanel{position:fixed;right:16px;bottom:8px;width:400px;max-height:82vh;overflow-y:auto;background:linear-gradient(rgba(252,228,240,0.95),rgba(247,215,232,0.9));color:#3b3b43;border:1px solid rgba(255,255,255,0.6);border-radius:12px;padding:12px;z-index:2147483647;font:13px/1.5 "Microsoft YaHei";box-shadow:inset 0 1px 0 rgba(255,255,255,0.85),0 8px 32px rgba(160,60,120,0.22);backdrop-filter:blur(14px) saturate(160%)}' +
       '#cxCfgPanel .field{margin:10px 0;border-bottom:1px solid rgba(255,255,255,0.5);padding-bottom:10px}' +
       '#cxCfgPanel .label{font-weight:600;margin-bottom:4px}' +
       '#cxCfgPanel .hint{font-size:11px;color:#9a949c;margin-top:4px;line-height:1.5}' +
@@ -352,19 +351,17 @@
       '#cxCfgPanel button#cfgClose{background:transparent;color:#3b3b43;border:1px solid transparent;box-shadow:none}' +
       '#cxCfgPanel button#cfgClose:hover{background:linear-gradient(rgba(240,155,196,0.4),rgba(228,145,184,0.32));border-color:rgba(255,255,255,0.6)}' +
       '#cxCfgPanel button#cfgClose:active{background:linear-gradient(rgba(0,0,0,0.12),rgba(0,0,0,0.12)),linear-gradient(rgba(240,155,196,0.4),rgba(228,145,184,0.32))}';
-    document.head.appendChild(style);
+    (document.head || document.documentElement).appendChild(style);
     document.body.appendChild(logPanel);
-    log('刷课助手 v' + scriptVersion() + ' 已加载(看这一行确认版本)');
+    log('刷课助手 v' + scriptVersion() + ' 已加载');
     document.getElementById('cxCfgBtn').addEventListener('click', showConfigUI);
     document.getElementById('cxRunBtn').addEventListener('click', togglePause);
-    // 展开/收起日志(小按钮,表头其余区域留给拖拽)
     document.getElementById('cxToggleBtn').addEventListener('click', () => {
       const logsEl = document.getElementById('cxLogs');
       const hidden = logsEl.style.display === 'none';
       logsEl.style.display = hidden ? '' : 'none';
       document.getElementById('cxToggleBtn').textContent = hidden ? '▼' : '▲';
     });
-    // 表头拖拽移动面板(按住表头空白处拖动;按钮区域不触发拖拽)
     const titleEl = document.getElementById('cxTitle');
     titleEl.addEventListener('mousedown', (e) => {
       if (e.target.closest('#cxRunBtn, #cxToggleBtn, #cxCfgBtn')) return;
@@ -387,11 +384,10 @@
       document.addEventListener('mousemove', onMove);
       document.addEventListener('mouseup', onUp);
     });
-    // 首次启动引导(显示在日志区顶部,滚动可见)
-    if (logLines.length === 0) {
-      logLines.push({ line: '💡 打开课程章节页即自动开始挂机(无需任何操作)', level: 'info' });
-      logLines.push({ line: '⚙ 设置(每项都有说明) | 「开始/停止」控制挂机 | ▼ 展开收起日志', level: 'info' });
-      logLines.push({ line: '🤖 自动做题:请点 ⚙ → 勾选 AI 答题并填写 DeepSeek API Key', level: 'warn' });
+    if (logLines.length <= 1) {
+      logLines.push({ line: '💡 打开课程章节页即自动开始挂机(支持同小节多标签页遍历)', level: 'info' });
+      logLines.push({ line: '⚙ 设置 | 「▶/⏸」控制挂机 | ▼ 展开收起日志', level: 'info' });
+      logLines.push({ line: '🤖 自动做题:请点 ⚙ → 勾选 AI 答题并选择平台填写 API Key', level: 'warn' });
     }
     const initLogs = document.getElementById('cxLogs');
     if (initLogs) initLogs.innerHTML = logLines.map((l) => `<div class="${l.level}">${l.line}</div>`).join('');
@@ -401,24 +397,34 @@
   function togglePause() {
     PAUSED = !PAUSED;
     setStatus(PAUSED ? '已暂停' : '工作中');
-    log(PAUSED ? '⏸ 已暂停挂机(当前任务完成后不再继续,点「开始」恢复)' : '▶ 已恢复挂机', PAUSED ? 'warn' : 'ok');
+    log(PAUSED ? '⏸ 已暂停挂机(当前任务完成后不再继续,点「▶」恢复)' : '▶ 已恢复挂机', PAUSED ? 'warn' : 'ok');
   }
+
+  let aiFailCount = 0;
+  let aiCooldownUntil = 0;
+  let aiCooldownWarned = false;
+  let aiKeyWarned = false;
 
   function showConfigUI() {
     const existing = document.getElementById('cxCfgPanel');
     if (existing) { existing.remove(); return; }
+    const curProvider = (CONFIG.aiProvider && PROVIDERS[CONFIG.aiProvider]) ? CONFIG.aiProvider : inferProviderFromUrl(CONFIG.aiUrl);
+    const curProviderName = (PROVIDERS[curProvider] && PROVIDERS[curProvider].name) || 'DeepSeek';
     const panel = document.createElement('div');
     panel.id = 'cxCfgPanel';
     panel.innerHTML =
       '<div class="field"><div class="label">🎬 视频倍速</div>' +
         '<input id="cfgSpeed" type="number" step="0.25" min="1" max="2" value="' + CONFIG.speed + '">' +
         '<div class="hint">默认 2x(最快);1 = 原速最安全,2x 被检测风险最高,自行权衡</div></div>' +
-      '<div class="field"><div class="label">🤖 AI 答题(DeepSeek)</div>' +
+      '<div class="field"><div class="label">⏩ 拖动视频进度条</div>' +
+        '<input id="cfgDrag" type="checkbox" ' + (CONFIG.dragVideoProgress ? 'checked' : '') + '>' +
+        '<div class="hint">开启后,当且仅当视频任务点完成条件为「时长 ≥ 90%」且未注明「不可拖拽」时,先播放前 10% 内片刻,再随机跳至 90% 以上继续播完;若任务点未完成会自动回退为稳妥倍速重播</div></div>' +
+      '<div class="field"><div class="label" id="cfgAILabel">🤖 AI 答题(' + curProviderName + ')</div>' +
         '<input id="cfgAI" type="checkbox" ' + (CONFIG.aiEnabled ? 'checked' : '') + '>' +
-        '<div class="hint">开启后,题库查不到的题目交给大模型自动作答(单选/判断接近 100%)。需在下方填写 API Key</div></div>' +
+        '<div class="hint">开启后,题目交给所选大模型自动作答。需在下方选择平台并填写 API Key</div></div>' +
       '<div class="field"><div class="label">🔑 AI Key</div>' +
         '<input id="cfgAIKey" type="password" placeholder="sk-..." value="' + CONFIG.aiKey + '">' +
-        '<div class="hint">到所选平台的官网注册并创建 API Key(sk- 开头)。只保存在你本机浏览器,不会上传;各平台注册地址见仓库 docs/get-api-key.md</div></div>' +
+        '<div class="hint">到所选平台的官网注册并创建 API Key。只保存在你本机浏览器,不会上传</div></div>' +
       '<div class="field"><div class="label">🏢 AI 平台</div>' +
         '<select id="cfgProvider">' +
         '<option value="deepseek">DeepSeek(推荐)</option>' +
@@ -435,66 +441,73 @@
         '<input id="cfgAIModel" type="text" list="cxModelList" value="' + CONFIG.aiModel + '">' +
         '<datalist id="cxModelList"></datalist>' +
         '<button id="cfgFetchModels" type="button" style="margin-top:6px">📋 自动获取模型列表</button>' +
-        '<div class="hint">先填好上方 Key 和接口地址,再点按钮:自动拉取该平台的可用模型,点输入框即可选择,无需手动抄模型名。拉取失败就手动填(各平台模型名见仓库 docs/get-api-key.md)</div></div>' +
+        '<div class="hint">先填好上方 Key 和接口地址,再点按钮:自动拉取该平台的可用模型,点输入框即可选择</div></div>' +
       '<div class="field"><div class="label">🌐 AI 接口地址</div>' +
         '<input id="cfgAIUrl" type="text" value="' + CONFIG.aiUrl + '">' +
-        '<div class="hint">OpenAI 兼容接口地址(以 /chat/completions 结尾)。默认 DeepSeek;MiniMax、智谱、硅基流动等平台的地址见仓库 docs/get-api-key.md</div></div>' +
+        '<div class="hint">OpenAI 兼容接口地址(以 /chat/completions 结尾)</div></div>' +
       '<div class="field"><div class="label">🎭 故意答错率(%)</div>' +
         '<input id="cfgErrRate" type="number" step="1" min="0" max="20" value="' + Math.round(CONFIG.deliberateErrorRate * 100) + '">' +
         '<div class="hint">拟人化:真人不会全对。填 8 = 8% 概率故意答错(判断题反着点、单选题点错项);填 0 关闭;多选不受影响</div></div>' +
       '<div class="field"><div class="label">⏱ 每日刷课上限(分钟)</div>' +
         '<input id="cfgDaily" type="number" step="30" min="0" max="1440" value="' + CONFIG.dailyLimitMinutes + '">' +
-        '<div class="hint">0 = 不限时长(当前默认);设正数则刷满该时长自动停止,第二天恢复。防"一天刷完"的异常曲线时可设 240</div></div>' +
+        '<div class="hint">0 = 不限时长(当前默认);设正数则刷满该时长自动停止,第二天恢复</div></div>' +
       '<div class="field"><div class="label">📤 自动提交测验</div>' +
         '<input id="cfgSubmit" type="checkbox" ' + (CONFIG.autoSubmit ? 'checked' : '') + '>' +
-        '<div class="hint">正确率 ≥ 60% 才自动提交;不足则暂存不交(不乱交卷),你可以回该章重做</div></div>' +
-      '<div class="field"><div class="label">📖 自动切章</div>' +
+        '<div class="hint">作答覆盖率 ≥ 60% 且无未做完题目提示时自动提交并确认弹窗;若提示还有未做完题目则自动取消交卷</div></div>' +
+      '<div class="field"><div class="label">📖 自动切章(含同节多标签页)</div>' +
         '<input id="cfgJump" type="checkbox" ' + (CONFIG.autoJump ? 'checked' : '') + '>' +
-        '<div class="hint">本章任务点全部完成后,自动进入下一章继续刷</div></div>' +
+        '<div class="hint">自动依次遍历同一小节内的多个顶部标签页(如「1 内容」「2 作业」),全部完成后自动进入下一章继续刷</div></div>' +
       '<div class="field"><div class="label">📡 状态上报地址(调试用)</div>' +
         '<input id="cfgReport" type="text" placeholder="http://127.0.0.1:8790/report" value="' + CONFIG.reportUrl + '">' +
-        '<div class="hint">留空 = 关闭。填入本机监听地址后,脚本会把当前页面状态(视频进度/任务点/题目容器/最近日志)定时推过去,方便本机程序或 AI 直接读真实状态。只发往你自己填的地址,不经过任何第三方服务器</div></div>' +
+        '<div class="hint">留空 = 关闭</div></div>' +
       '<div class="field"><div class="label">📋 导出已收集题目</div>' +
         '<button id="cfgExport" type="button">复制题目数据</button>' +
-        '<div class="hint">把做过的所有题目(题干+选项+答案)复制到剪贴板,可发给 AI 整理成考前手册;也可以拿去做题库备份</div></div>' +
+        '<div class="hint">把做过的所有题目(题干+选项+答案)复制到剪贴板</div></div>' +
       '<div class="btns"><button id="cfgClose">关闭</button><button id="cfgSave">保存</button></div>';
     document.body.appendChild(panel);
+
+    const providerSelect = document.getElementById('cfgProvider');
+    providerSelect.value = curProvider;
+
+    providerSelect.addEventListener('change', (e) => {
+      const val = e.target.value;
+      const p = PROVIDERS[val] || PROVIDERS.custom;
+      if (val !== 'custom') {
+        document.getElementById('cfgAIUrl').value = p.url;
+        document.getElementById('cfgAIModel').value = p.model;
+      }
+      const lbl = document.getElementById('cfgAILabel');
+      if (lbl) lbl.textContent = '🤖 AI 答题(' + (p.name || '自定义') + ')';
+    });
+
     document.getElementById('cfgSave').addEventListener('click', () => {
       CONFIG.speed = parseFloat(document.getElementById('cfgSpeed').value) || 1;
       if (CONFIG.speed < 1) CONFIG.speed = 1;
       if (CONFIG.speed > 2) CONFIG.speed = 2;
+      CONFIG.dragVideoProgress = document.getElementById('cfgDrag').checked;
       CONFIG.aiEnabled = document.getElementById('cfgAI').checked;
+      CONFIG.aiProvider = document.getElementById('cfgProvider').value || 'deepseek';
       CONFIG.aiKey = document.getElementById('cfgAIKey').value.trim();
-      CONFIG.aiModel = document.getElementById('cfgAIModel').value.trim() || 'deepseek-reasoner';
-      CONFIG.aiUrl = document.getElementById('cfgAIUrl').value.trim() || 'https://api.deepseek.com/v1/chat/completions';
+      const defP = PROVIDERS[CONFIG.aiProvider] || PROVIDERS.deepseek;
+      CONFIG.aiModel = document.getElementById('cfgAIModel').value.trim() || defP.model || 'deepseek-chat';
+      CONFIG.aiUrl = document.getElementById('cfgAIUrl').value.trim() || defP.url || 'https://api.deepseek.com/v1/chat/completions';
       CONFIG.deliberateErrorRate = (parseFloat(document.getElementById('cfgErrRate').value) || 0) / 100;
       CONFIG.dailyLimitMinutes = parseFloat(document.getElementById('cfgDaily').value) || 0;
       CONFIG.autoSubmit = document.getElementById('cfgSubmit').checked;
       CONFIG.autoJump = document.getElementById('cfgJump').checked;
       CONFIG.reportUrl = document.getElementById('cfgReport').value.trim();
       saveConfig(CONFIG);
-      log('配置已保存(倍速 ' + CONFIG.speed + 'x, AI ' + (CONFIG.aiEnabled ? '开' : '关') + ')', 'ok');
+      aiFailCount = 0;
+      aiCooldownUntil = 0;
+      aiCooldownWarned = false;
+      aiKeyWarned = false;
+      const pName = (PROVIDERS[CONFIG.aiProvider] && PROVIDERS[CONFIG.aiProvider].name) || CONFIG.aiProvider;
+      log(`配置已保存(倍速 ${CONFIG.speed}x, 拖进度 ${CONFIG.dragVideoProgress ? '开' : '关'}, AI ${CONFIG.aiEnabled ? '开 [' + pName + ' / ' + CONFIG.aiModel + ']' : '关'})`, 'ok');
       panel.remove();
     });
     document.getElementById('cfgClose').addEventListener('click', () => panel.remove());
     document.getElementById('cfgExport').addEventListener('click', exportQuestions);
-    // 平台预设:选平台自动填接口地址和默认模型
-    const PROVIDERS = {
-      deepseek: { url: 'https://api.deepseek.com/v1/chat/completions', model: 'deepseek-reasoner' },
-      siliconflow: { url: 'https://api.siliconflow.cn/v1/chat/completions', model: 'deepseek-ai/DeepSeek-V3' },
-      minimax: { url: 'https://api.minimaxi.com/v1/chat/completions', model: 'MiniMax-Text-01' },
-      zhipu: { url: 'https://open.bigmodel.cn/api/paas/v4/chat/completions', model: 'glm-4-plus' },
-      qwen: { url: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions', model: 'qwen-plus' },
-      kimi: { url: 'https://api.moonshot.cn/v1/chat/completions', model: 'moonshot-v1-8k' },
-      openai: { url: 'https://api.openai.com/v1/chat/completions', model: 'gpt-4o-mini' },
-      custom: { url: '', model: '' }
-    };
-    document.getElementById('cfgProvider').addEventListener('change', (e) => {
-      const p = PROVIDERS[e.target.value] || PROVIDERS.custom;
-      document.getElementById('cfgAIUrl').value = p.url;
-      document.getElementById('cfgAIModel').value = p.model;
-    });
-    // 自动拉取模型列表:调 OpenAI 兼容的 /models 接口,填充下拉候选
+
     document.getElementById('cfgFetchModels').addEventListener('click', async () => {
       const base = document.getElementById('cfgAIUrl').value.trim();
       const key = document.getElementById('cfgAIKey').value.trim();
@@ -524,7 +537,6 @@
   }
 
   /* ==================== 答案通道 ==================== */
-  // 免费题库站(协议参考社区成熟脚本,无 token 时部分接口仍返回免费额度答案)
   async function channelTikuHai(q) {
     try {
       const res = JSON.parse(await cxFetch('http://api.tikuhai.com/search', {
@@ -573,15 +585,13 @@
       return { form: '木课工具', answer: String(res.data || '').split('#') };
     } catch (e) { return { form: '木课工具', answer: [] }; }
   }
-  let aiFailCount = 0;
-  let aiCooldownUntil = 0;
-  let aiCooldownWarned = false;
+
   function channelAI(q) {
     return new Promise((resolve) => {
       if (Date.now() < aiCooldownUntil) {
         if (!aiCooldownWarned) {
           aiCooldownWarned = true;
-          log('AI 通道冷却中(连续失败后暂停 10 分钟),请检查 ⚙ 里的 Key/平台/接口地址/模型', 'warn');
+          log('AI 通道冷却中(连续失败后暂停 10 分钟),重新点 ⚙ 保存配置可立即重置', 'warn');
         }
         resolve({ form: 'AI(冷却中)', answer: [] });
         return;
@@ -594,17 +604,17 @@
           { role: 'user', content: prompt }
         ],
         temperature: 0.1,
-        max_tokens: 300
+        max_tokens: 1024
       });
       const done = (answer, errLog) => {
         if (errLog) {
           aiFailCount++;
-          log(`AI 请求失败(${aiFailCount}/3): ${errLog}`, 'err');
+          log(`AI 请求失败(${aiFailCount}/3) [${CONFIG.aiModel}]: ${errLog}`, 'err');
           if (aiFailCount >= 3) {
             aiCooldownUntil = Date.now() + 10 * 60 * 1000;
             aiCooldownWarned = false;
             aiFailCount = 0;
-            log('AI 通道连续失败 3 次,暂停 10 分钟后自动重试。常见原因:Key 错误/余额不足/接口地址或模型名填错', 'warn');
+            log('AI 通道连续失败 3 次,暂停 10 分钟(在 ⚙ 中修改并保存配置可立即解除冷却)', 'warn');
           }
         } else {
           aiFailCount = 0;
@@ -613,34 +623,37 @@
         }
         resolve({ form: 'AI', answer });
       };
-      GM_xmlhttpRequest({
-        method: 'POST',
-        url: CONFIG.aiUrl,
-        data,
-        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + CONFIG.aiKey },
-        timeout: 30000,
-        onload: (res) => {
-          try {
-            if (res.status !== 200) {
-              done([], `HTTP ${res.status}: ${String(res.responseText).slice(0, 180)}`);
-              return;
+      try {
+        GM_xmlhttpRequest({
+          method: 'POST',
+          url: CONFIG.aiUrl,
+          data,
+          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + CONFIG.aiKey },
+          timeout: 30000,
+          onload: (res) => {
+            try {
+              if (res.status !== 200) {
+                done([], `HTTP ${res.status}: ${String(res.responseText).slice(0, 180)}`);
+                return;
+              }
+              const obj = JSON.parse(res.responseText);
+              let content = ((obj.choices && obj.choices[0] && obj.choices[0].message && obj.choices[0].message.content) || '').trim();
+              if (!content) {
+                const rc = ((obj.choices && obj.choices[0] && obj.choices[0].message && obj.choices[0].message.reasoning_content) || '').trim();
+                content = rc.slice(-300);
+              }
+              if (!content) { done([], '返回内容为空'); return; }
+              done(parseAIAnswer(q.type, content));
+            } catch (e) {
+              done([], '解析失败: ' + (e.message || e));
             }
-            const obj = JSON.parse(res.responseText);
-            let content = ((obj.choices && obj.choices[0] && obj.choices[0].message && obj.choices[0].message.content) || '').trim();
-            // 推理模型(deepseek-reasoner)有时把结论放在 reasoning_content、content 留空——取推理末尾作答案
-            if (!content) {
-              const rc = ((obj.choices && obj.choices[0] && obj.choices[0].message && obj.choices[0].message.reasoning_content) || '').trim();
-              content = rc.slice(-300);
-            }
-            if (!content) { done([], '返回内容为空'); return; }
-            done(parseAIAnswer(q.type, content));
-          } catch (e) {
-            done([], '解析失败: ' + (e.message || e));
-          }
-        },
-        onerror: () => { done([], '网络错误'); },
-        ontimeout: () => { done([], '超时(30s)'); }
-      });
+          },
+          onerror: (err) => { done([], '网络或跨域错误(' + (err && err.error ? err.error : '请检查接口地址与Key') + ')'); },
+          ontimeout: () => { done([], '请求超时(30s)'); }
+        });
+      } catch (e) {
+        done([], '调用异常: ' + (e.message || e));
+      }
     });
   }
 
@@ -667,12 +680,11 @@
     }
   }
 
-  // 答案通道:AI 优先(准确率最高),免费题库并行兜底
   function filterAnswers(arr) {
     return (arr || []).map(String).map(clean)
       .filter((a) => a && a !== '暂无答案' && a !== '略' && !/(付费|购买|卡密|升级|公众号|扫码|微信)/.test(a));
   }
-  let aiKeyWarned = false;
+
   async function getAnswers(q) {
     if (CONFIG.aiEnabled && CONFIG.aiKey) {
       const r = await channelAI(q);
@@ -683,7 +695,7 @@
       }
     } else if (!aiKeyWarned) {
       aiKeyWarned = true;
-      log('⚠ 未启用 AI 答题:点面板 ⚙ → 勾选「AI 答题」并填写 DeepSeek API Key,否则无法自动做题', 'warn');
+      log('⚠ 未启用 AI 答题:点面板 ⚙ → 勾选「AI 答题」并填写 API Key,否则无法自动做题', 'warn');
     }
     const results = CONFIG.useTiku
       ? await Promise.all([channelTikuHai(q), channelYizhi(q), channelYanxi(q), channelMuketool(q)])
@@ -695,12 +707,11 @@
         return ans;
       }
     }
-    log('未查到答案' + ((!CONFIG.aiEnabled || !CONFIG.aiKey) ? '(原因:AI 答题未启用,请点 ⚙ 配置)' : ''), 'warn');
+    log('未查到答案' + ((!CONFIG.aiEnabled || !CONFIG.aiKey) ? '(原因:AI 答题未启用或未填 Key,请点 ⚙ 配置)' : ''), 'warn');
     return [];
   }
 
   /* ==================== 题目提取 ==================== */
-  // 章节测验(.TiMu 容器)
   function extractQuizQuestion(el) {
     try {
       const label = el.querySelector('.clearfix .fontLabel');
@@ -709,14 +720,13 @@
       if (!text) return null;
       const typeInput = el.querySelector('input[name^=answertype]');
       const type = typeInput ? typeInput.value : '0';
-      // 选项:多种结构兜底(学习通不同版本选项 DOM 不同)
       let options = Array.from(el.querySelectorAll('ul li .after')).map((o) => clean(o.innerHTML)).filter(Boolean);
       if (!options.length) options = Array.from(el.querySelectorAll('ul li')).map((o) => clean(o.innerHTML)).filter(Boolean);
       if (!options.length) options = Array.from(el.querySelectorAll('.answerBg, .num_option, .after')).map((o) => clean(o.innerHTML)).filter(Boolean);
       return { question: text, options, type };
     } catch (e) { return null; }
   }
-  // 作业页(.questionLi 容器)
+
   function extractWorkQuestion(el) {
     try {
       const mark = el.querySelector('.mark_name');
@@ -753,11 +763,51 @@
     return idx;
   }
 
-  // 清空当前已勾选的选项(重做时避免旧答案残留叠加)
   function clearCurrent(el) {
     el.querySelectorAll('input[type=radio], input[type=checkbox]').forEach((inp) => {
       if (inp.checked) { try { inp.click(); } catch (e) { /* ignore */ } }
     });
+  }
+
+  function isNodeSelected(node) {
+    if (!node) return false;
+    const inp = node.matches && node.matches('input') ? node : node.querySelector('input[type=radio], input[type=checkbox]');
+    if (inp && inp.checked) return true;
+    if (node.getAttribute && node.getAttribute('aria-checked') === 'true') return true;
+    if (node.querySelector && node.querySelector('[aria-checked="true"]')) return true;
+    const cls = [node.className || '']
+      .concat(Array.from(node.querySelectorAll ? node.querySelectorAll('*') : []).map((n) => n.className || ''))
+      .join(' ');
+    return /(^|\s)(Hover|cur|active|checked|is-checked|selected|ans-opt-checked|choosed|check_answer)(\s|$)/i.test(cls);
+  }
+
+  function classifyBoolOption(node, index, total) {
+    const inp = node.querySelector ? node.querySelector('input') : null;
+    const rawVals = [
+      inp ? inp.value : '',
+      node.getAttribute ? node.getAttribute('data-value') : '',
+      node.getAttribute ? node.getAttribute('value') : '',
+      node.getAttribute ? node.getAttribute('aria-label') : ''
+    ].map((s) => String(s || '').trim());
+
+    for (const v of rawVals) {
+      if (/^(true|正确|对|√|t|是|ri)$/i.test(v)) return 'true';
+      if (/^(false|错误|错|×|x|f|否|wr)$/i.test(v)) return 'false';
+    }
+    const text = clean(node.textContent || '').replace(/^[A-Ha-h][、.．:)\s]+/, '').trim();
+    if (/^(true|正确|对|√|是)$/i.test(text) || /\btrue\b|正确|√/i.test(text)) return 'true';
+    if (/^(false|错误|错|×|x|否)$/i.test(text) || /\bfalse\b|错误|×/i.test(text)) return 'false';
+    if (total === 2) return index === 0 ? 'true' : 'false';
+    return null;
+  }
+
+  function clickOptionNode(node) {
+    if (!node) return;
+    const inp = node.querySelector ? node.querySelector('input[type=radio], input[type=checkbox], input') : null;
+    const inner = node.querySelector ? node.querySelector('.after, .answerBg, .num_option, label, a, span') : null;
+    try { if (inp) inp.click(); } catch (e) { /* ignore */ }
+    try { if (inner && !isNodeSelected(node)) inner.click(); } catch (e) { /* ignore */ }
+    try { if (!isNodeSelected(node)) node.click(); } catch (e) { /* ignore */ }
   }
 
   function setQuizAnswer(answerArr, q, el, win) {
@@ -767,7 +817,6 @@
       case '1': {
         let idx = matchAnswer(answerArr, q.options);
         if (!idx.length) return false;
-        // 拟人:单选题按配置概率故意点错(多选不故意错)
         if (String(q.type) === '0' && CONFIG.deliberateErrorRate > 0 && Math.random() < CONFIG.deliberateErrorRate && q.options && q.options.length > 1) {
           const wrongIdx = [];
           for (let i = 0; i < q.options.length; i++) if (!idx.includes(i)) wrongIdx.push(i);
@@ -779,22 +828,20 @@
         clearCurrent(el);
         const lis = $$('ul li');
         if (lis.length) {
+          let hit = false;
           lis.forEach((li, i) => {
             if (idx.includes(i)) {
-              const input = li.querySelector('input[type=radio], input[type=checkbox]');
-              try { if (input) input.click(); } catch (e) { /* ignore */ }
-              try { li.click(); } catch (e) { /* ignore */ }
+              clickOptionNode(li);
+              if (isNodeSelected(li)) hit = true;
             }
           });
-          return true;
+          return hit || idx.length > 0;
         }
-        // 兜底1:直接点第 idx 个选项控件
         const inputs = $$('input[type=radio], input[type=checkbox]');
         if (inputs.length) {
           idx.forEach((i) => { const inp = inputs[i]; if (inp) { try { inp.click(); } catch (e) { /* ignore */ } } });
           return true;
         }
-        // 兜底2:点第 idx 个常见选项容器
         const optEls = $$('.answerBg, .num_option, .after, .ans-opt');
         if (optEls.length) {
           idx.forEach((i) => { const o = optEls[i]; if (o) { try { o.click(); } catch (e) { /* ignore */ } } });
@@ -812,15 +859,26 @@
           wantTrue = isFalse; wantFalse = isTrue;
           log('🎭 拟人模式:本题故意答错(配置概率)', 'info');
         }
+        const targetKind = wantTrue ? 'true' : 'false';
         clearCurrent(el);
-        $$('ul li').forEach((li) => {
-          const input = li.querySelector('input');
-          const val = input ? String(input.value) : '';
-          if ((wantTrue && val === 'true') || (wantFalse && val === 'false')) {
-            try { li.click(); } catch (e) { /* ignore */ }
+
+        let candidates = $$('ul li');
+        if (!candidates.length) candidates = $$('.answerBg, .num_option, .ans-opt, label');
+        if (!candidates.length) return false;
+
+        let selected = false;
+        candidates.forEach((node, idx) => {
+          const kind = classifyBoolOption(node, idx, candidates.length);
+          if (kind === targetKind) {
+            clickOptionNode(node);
+            if (isNodeSelected(node)) selected = true;
           }
         });
-        return true;
+        if (!selected) {
+          const anyChecked = el.querySelector('input[type=radio]:checked, input[type=checkbox]:checked, [aria-checked="true"], .Hover, .cur, .active, .is-checked, .check_answer');
+          selected = !!anyChecked;
+        }
+        return selected;
       }
       case '2':
       case '4':
@@ -835,9 +893,7 @@
     }
   }
 
-  // ===== 文本类(填空/简答)填写:兼容 UEditor 等富文本编辑器(正文在 iframe 里) =====
-  // 关键:UEditor 的正文是 iframe 内的 contenteditable body,顶层只有隐藏 textarea,
-  // 直接给顶层 textarea 赋值用户看不到任何东西。这里必须逐层找、写完回读校验。
+  /* ===== 文本类(填空/简答)填写 ===== */
   function textValueOf(node) {
     try {
       if (!node) return '';
@@ -853,8 +909,8 @@
     } catch (e) { return false; }
   }
   function collectTextTargets(el) {
-    const rich = [];   // 富文本(iframe body / contenteditable)
-    const plain = [];  // textarea / 单行 input
+    const rich = [];
+    const plain = [];
     const seen = new Set();
     const pushRich = (doc, node) => {
       if (!node || seen.has(node)) return;
@@ -866,11 +922,10 @@
         const doc = f.contentDocument;
         if (!doc || !doc.body) return;
         if (isRichHost(doc.body, f)) pushRich(doc, doc.body);
-      } catch (e) { /* 跨域跳过 */ }
+      } catch (e) { /* ignore */ }
     });
     scanFrames(el);
     Array.from(el.querySelectorAll('[contenteditable="true"], [contenteditable=""]')).forEach((n) => pushRich(n.ownerDocument, n));
-    // 有的页面把编辑器渲染在题目容器之外 → 扩大到整页再找一次
     if (!rich.length) {
       scanFrames(document);
       Array.from(document.querySelectorAll('[contenteditable="true"], .edui-body, .ql-editor, .w-e-text, .cke_editable')).forEach((n) => pushRich(n.ownerDocument, n));
@@ -913,7 +968,6 @@
     } catch (e) { /* ignore */ }
   }
   function stripTags(s) { return String(s || '').replace(/<[^>]*>/g, '').replace(/&nbsp;/g, ' ').replace(/\s+/g, ''); }
-  // UEditor 官方 API:能同步编辑器内部状态(提交时才带得走)
   function tryUE(win, text, need) {
     try {
       const UE = win && win.UE;
@@ -923,7 +977,7 @@
         if (!ed || typeof ed.setContent !== 'function') return false;
         if (typeof ed.getContent === 'function') {
           const cur = stripTags(ed.getContent());
-          if (cur.length >= need(text) && cur.indexOf(text.slice(0, 6)) >= 0) return true;  // 已经写好了
+          if (cur.length >= need(text) && cur.indexOf(text.slice(0, 6)) >= 0) return true;
         }
         ed.setContent(text);
         return typeof ed.getContent === 'function' && stripTags(ed.getContent()).length >= need(text);
@@ -943,19 +997,12 @@
     const texts = (answerArr || []).map((a) => cl(clean(String(a == null ? '' : a)).replace(/^第.空[:：]?/, ''))).filter(Boolean);
     if (!texts.length) return false;
     const need = (t) => Math.min(6, t.length);
-
-    // ① UEditor 官方 API 最优先(能同步编辑器内部状态,提交时带得走)
     if (tryUE(win, texts[0], need)) return true;
-
     const { rich, plain } = collectTextTargets(el);
-
-    // ② 富文本容器注入(iframe body / contenteditable)
     for (const t of rich) {
       writeRich(t, texts[0]);
       if (textValueOf(t.node).length >= need(texts[0])) return true;
     }
-
-    // ③ 可见文本框:多空填空逐框填,单框填整段
     const vis = plain.filter((t) => !t.hidden);
     if (vis.length > 1 && texts.length > 1) {
       let filled = 0;
@@ -965,8 +1012,6 @@
     for (const t of vis) {
       if (setPlain(t, texts[0])) return true;
     }
-
-    // ④ 隐藏 textarea 兜底:只写值不算成功,必须 UE API 能回读确认
     for (const t of plain.filter((x) => x.hidden)) {
       setPlain(t, texts[0]);
       try {
@@ -984,18 +1029,20 @@
   }
 
   function isVisible(el) {
+    if (!el || !el.getBoundingClientRect) return false;
     const r = el.getBoundingClientRect();
     if (r.width < 2 || r.height < 2) return false;
     const cs = el.ownerDocument.defaultView.getComputedStyle(el);
-    return cs.display !== 'none' && cs.visibility !== 'hidden';
+    return cs.display !== 'none' && cs.visibility !== 'hidden' && cs.opacity !== '0';
   }
 
   function clickButtonByText(win, texts) {
-    const nodes = win.document.querySelectorAll('button, .btn, a, .el-button, .jb_btn, input[type=button], input[type=submit]');
+    const nodes = win.document.querySelectorAll('button, .btn, a, .el-button, .jb_btn, input[type=button], input[type=submit], span');
     for (const n of nodes) {
+      if (!isVisible(n)) continue;
       const t = (n.textContent || n.value || '').trim();
       for (const kw of texts) {
-        if (t && (t === kw || t.includes(kw))) {
+        if (t && (t === kw || (t.length <= 10 && t.includes(kw)))) {
           try { n.click(); } catch (e) { /* ignore */ }
           return true;
         }
@@ -1004,39 +1051,198 @@
     return false;
   }
 
-  /* ==================== 字体加密解密(Canvas 字形对比法) ==================== */
-  // 候选字符集:常用汉字 + 数字字母 + 常见符号(课程题目用字基本都在内)
-  const COMMON_CHARS =
-    '的一是在不了有和人这中大为上个国我以要他时来用们生到作地于出就分对成会可主发年动同工也能下过子说产种面而方后多定行学法所民得经十三之进着等部度家电力里如水化高自二理起小物实现加量都两体制机当使点从业本去把性好应开它合还因由其些然前外天政四日那社义事平形相全表间样与关各重新线内数正心反你明看原又么利比或但质气第向道命此变条只没结解问意建月公无系军很情者最立代想已通并提直题党程展五果料象员革位入常文总次品式活设及管特件长求老头基资边流路级少图山统接知较将组见计别她手角期根论运农指几九区强放决西被干做必战先回则任取据处队南给色光门即保治北造百规热领七海口东导器压志世金增争济阶油思术极交受联什认六共权收证改清己美再采转更单风切打白教速花带安场身车例真务具万每目至达走积示议声报斗完类八离华名确才科张信马节话米整空元况今集温传土许步群广石记需段研界拉林律叫且究观越织装影算低持音众书布复容儿须际商非验连断深难近千周委素技备半办青省列习响约支般史感劳便团往酸历市克何除消构府称太准精值号率族维划选标写存候毛亲快效斯院查江型眼王按格养易置派层片始却专状育厂京识适属圆包火住调满县局照参红细引听该铁价严龙飞' +
-    '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz' +
-    '，。、；：？！“”‘’（）《》〈〉【】[]{}·—…%＋－×÷＝√（）+-×÷=%/\\.,;:!?_*&#@' +
-    '一二三四五六七八九十百千万亿年月日时分秒甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳午未申酉戌亥';
-  const FONT_NAME = 'cxfontdec';
-  let _fontCanvas = null;
-  let _fontCtx = null;
+ /* ==================== 字体加密解密 (TTF 码点筛查 + 网格化视觉大模型 OCR) ==================== */
+  // 极简 TTF cmap 解析器:仅用于精准筛出 gid !== 0 的真加密字,普通文字(gid === 0)直接保持不变
+  const MiniTypr = {
+    readUshort(buff, p) { return (buff[p] << 8) | buff[p + 1]; },
+    readShort(buff, p) { const u = (buff[p] << 8) | buff[p + 1]; return (u & 0x8000) ? u - 0x10000 : u; },
+    readUint(buff, p) { return ((buff[p] * 16777216) + ((buff[p + 1] << 16) | (buff[p + 2] << 8) | buff[p + 3])); },
+    readASCII(buff, p, l) { let s = ''; for (let i = 0; i < l; i++) s += String.fromCharCode(buff[p + i]); return s; },
 
-  function getFontCtx() {
-    if (!_fontCanvas) {
-      _fontCanvas = document.createElement('canvas');
-      _fontCanvas.width = 32;
-      _fontCanvas.height = 32;
-      _fontCtx = _fontCanvas.getContext('2d');
+    parse(buff) {
+      const numTables = this.readUshort(buff, 4);
+      const tables = {};
+      for (let i = 0; i < numTables; i++) {
+        const off = 12 + i * 16;
+        const tag = this.readASCII(buff, off, 4);
+        tables[tag] = { offset: this.readUint(buff, off + 8), length: this.readUint(buff, off + 12) };
+      }
+      const cmapOff = tables.cmap.offset;
+      const numSub = this.readUshort(buff, cmapOff + 2);
+      const subtables = [];
+      for (let i = 0; i < numSub; i++) {
+        const pid = this.readUshort(buff, cmapOff + 4 + i * 8);
+        const eid = this.readUshort(buff, cmapOff + 6 + i * 8);
+        const subOff = cmapOff + this.readUint(buff, cmapOff + 8 + i * 8);
+        const fmt = this.readUshort(buff, subOff);
+        subtables.push({ pid, eid, subOff, fmt });
+      }
+      const bestSub = subtables.find((s) => s.fmt === 12) || subtables.find((s) => s.fmt === 4 && (s.pid === 3 || s.pid === 0)) || subtables[0];
+      return { buff, cmapSub: bestSub };
+    },
+
+    codeToGlyph(font, code) {
+      if (!font || !font.cmapSub) return 0;
+      const { buff } = font;
+      const { subOff, fmt } = font.cmapSub;
+      if (fmt === 4) {
+        const segCount = this.readUshort(buff, subOff + 6) >> 1;
+        const endCountOff = subOff + 14;
+        const startCountOff = endCountOff + segCount * 2 + 2;
+        const idDeltaOff = startCountOff + segCount * 2;
+        const idRangeOffsetOff = idDeltaOff + segCount * 2;
+        for (let i = 0; i < segCount; i++) {
+          const end = this.readUshort(buff, endCountOff + i * 2);
+          if (code <= end) {
+            const start = this.readUshort(buff, startCountOff + i * 2);
+            if (code < start) return 0;
+            const idDelta = this.readShort(buff, idDeltaOff + i * 2);
+            const idRangeOffset = this.readUshort(buff, idRangeOffsetOff + i * 2);
+            if (idRangeOffset === 0) return (code + idDelta) & 0xFFFF;
+            const glyphAddr = idRangeOffsetOff + i * 2 + idRangeOffset + (code - start) * 2;
+            const gid = this.readUshort(buff, glyphAddr);
+            return gid === 0 ? 0 : (gid + idDelta) & 0xFFFF;
+          }
+        }
+        return 0;
+      } else if (fmt === 12) {
+        const nGroups = this.readUint(buff, subOff + 12);
+        for (let i = 0; i < nGroups; i++) {
+          const gOff = subOff + 16 + i * 12;
+          const start = this.readUint(buff, gOff);
+          const end = this.readUint(buff, gOff + 4);
+          if (code >= start && code <= end) return this.readUint(buff, gOff + 8) + (code - start);
+        }
+      }
+      return 0;
     }
-    return _fontCtx;
+  };
+
+  function base64ToUint8Array(base64) {
+    const data = window.atob(base64);
+    const buff = new Uint8Array(data.length);
+    for (let i = 0; i < data.length; ++i) buff[i] = data.charCodeAt(i);
+    return buff;
   }
 
-  // 用解密字体渲染一个字符,返回二值化的字形指纹
-  function glyphBits(ch) {
-    const ctx = getFontCtx();
-    ctx.clearRect(0, 0, 32, 32);
-    ctx.font = '28px ' + FONT_NAME;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(ch, 16, 17);
-    const d = ctx.getImageData(0, 0, 32, 32).data;
-    let s = '';
-    for (let i = 3; i < d.length; i += 4) s += d[i] > 120 ? '1' : '0';
-    return s;
+  // 网格化视觉大模型识字:每批最多 24 字,按 8 列带编号方格绘制,彻底避免超宽图片压缩与漏字错位
+  async function recognizeBatchViaVisionAI(charsBatch, fontName) {
+    const resMap = new Map();
+    const cols = Math.min(8, charsBatch.length);
+    const rows = Math.ceil(charsBatch.length / cols);
+    const cellW = 72, cellH = 82;
+    const canvas = document.createElement('canvas');
+    canvas.width = cols * cellW;
+    canvas.height = rows * cellH;
+    const ctx = canvas.getContext('2d');
+
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    charsBatch.forEach((ch, idx) => {
+      const c = idx % cols;
+      const r = Math.floor(idx / cols);
+      const x = c * cellW, y = r * cellH;
+      // 绘制浅灰边框防止字符粘连
+      ctx.strokeStyle = '#e5e7eb';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(x + 0.5, y + 0.5, cellW - 1, cellH - 1);
+      // 左上角绘制序号 (1..N)
+      ctx.fillStyle = '#6b7280';
+      ctx.font = '12px sans-serif';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      ctx.fillText(String(idx + 1), x + 4, y + 3);
+      // 中央绘制加密字体渲染出的真实汉字
+      ctx.fillStyle = '#000000';
+      ctx.font = `38px "${fontName}"`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(ch, x + cellW / 2, y + cellH / 2 + 8);
+    });
+
+    const dataUrl = canvas.toDataURL('image/png');
+    const promptText =
+      `图片中有 ${charsBatch.length} 个带编号的方格(编号 1 到 ${charsBatch.length})，每个方格中央有 1 个汉字或字符。\n` +
+      `请按编号顺序输出每个方格中的字符，格式严格为：1:字 2:字 3:字 ...（用空格分隔，不要输出任何解释或多余内容）。`;
+
+    const payload = JSON.stringify({
+      model: CONFIG.aiModel,
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'text', text: promptText },
+          { type: 'image_url', image_url: { url: dataUrl } }
+        ]
+      }],
+      temperature: 0.1,
+      max_tokens: 1024
+    });
+
+    const respText = await cxFetch(CONFIG.aiUrl, {
+      method: 'POST',
+      data: payload,
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + CONFIG.aiKey },
+      timeout: 25000
+    });
+    const obj = JSON.parse(respText);
+    const out = ((obj.choices && obj.choices[0] && obj.choices[0].message && obj.choices[0].message.content) || '').trim();
+    if (!out) return resMap;
+
+    // 优先解析 "1:字 2:字" 编号映射(即使个别字漏认也不会影响后续编号对齐)
+    const pairRegex = /(\d+)\s*[:：.、]\s*([^\s\d:：.、])/g;
+    let match;
+    while ((match = pairRegex.exec(out)) !== null) {
+      const idx = parseInt(match[1], 10) - 1;
+      const val = match[2];
+      if (idx >= 0 && idx < charsBatch.length && val) {
+        resMap.set(charsBatch[idx], val);
+      }
+    }
+
+    // 兜底:若模型直接连续输出了纯字符
+    if (resMap.size < charsBatch.length * 0.5) {
+      const pure = out.replace(/[\d:：.、\s,，;；]/g, '');
+      if (pure.length === charsBatch.length) {
+        charsBatch.forEach((ch, i) => resMap.set(ch, pure[i]));
+      }
+    }
+    return resMap;
+  }
+
+  async function recognizeGlyphsViaVisionAI(unresolvedChars, b64) {
+    const totalMap = new Map();
+    if (!CONFIG.aiEnabled || !CONFIG.aiKey || !unresolvedChars.length) return totalMap;
+    try {
+      const fontName = 'cxfontdec_' + Date.now();
+      const ff = new FontFace(fontName, 'url(data:font/ttf;base64,' + b64 + ')');
+      document.fonts.add(ff);
+      await ff.load();
+      await sleep(0.15);
+
+      // 每 24 个字符分一批识别,确保极高准确率
+      const batchSize = 24;
+      for (let i = 0; i < unresolvedChars.length; i += batchSize) {
+        const batch = unresolvedChars.slice(i, i + batchSize);
+        let batchMap = await recognizeBatchViaVisionAI(batch, fontName);
+        // 若单批未能全部识别,自动重试一次该批次
+        if (batchMap.size < batch.length) {
+          const retryChars = batch.filter((c) => !batchMap.has(c));
+          if (retryChars.length > 0) {
+            const retryMap = await recognizeBatchViaVisionAI(retryChars, fontName);
+            for (const [k, v] of retryMap) batchMap.set(k, v);
+          }
+        }
+        for (const [k, v] of batchMap) totalMap.set(k, v);
+      }
+      if (totalMap.size > 0) {
+        const preview = Array.from(totalMap.values()).join('');
+        log(`👁 视觉模型成功识别 ${totalMap.size}/${unresolvedChars.length} 个加密字: ${preview}`, 'ok');
+      }
+    } catch (e) {
+      log('⚠ 视觉模型识字调用异常: ' + (e.message || e), 'warn');
+    }
+    return totalMap;
   }
 
   function extractFontBase64(win) {
@@ -1053,61 +1259,80 @@
     return null;
   }
 
-  // 核心:学习通的加密字体内,把"真实字符"的字形映射到了错误码点。
-  // 用同一字体渲染"候选常用字"和"乱码字符",字形指纹相同即为同一字符。
   async function decodeFont(win) {
+    const els = Array.from(win.document.querySelectorAll('.font-cxsecret'));
+    if (!els.length) return true;
     const b64 = extractFontBase64(win);
     if (!b64) {
-      if (win.document.querySelector('.font-cxsecret')) log('未找到字体定义(可能为其他加密方式)', 'warn');
+      log('⚠ 未找到 font-cxsecret 字体定义', 'warn');
       return false;
     }
+
+    let font = null;
     try {
-      const ff = new FontFace(FONT_NAME, 'url(data:font/ttf;base64,' + b64 + ')');
-      document.fonts.add(ff);
-      await ff.load();
-    } catch (e) { log('加密字体加载失败: ' + (e.message || e), 'warn'); return false; }
-    const els = Array.from(win.document.querySelectorAll('.font-cxsecret'));
-    if (!els.length) return false;
-    const targets = new Set();
-    els.forEach((el) => { for (const ch of String(el.textContent || '')) targets.add(ch); });
-    if (!targets.size) return false;
-    const tHashes = new Map();
-    for (const ch of targets) {
-      try { tHashes.set(ch, glyphBits(ch)); } catch (e) { /* ignore */ }
+      font = MiniTypr.parse(base64ToUint8Array(b64));
+    } catch (e) {
+      log('⚠ TTF 二进制解析异常: ' + (e.message || e), 'warn');
     }
-    if (!tHashes.size) return false;
-    log(`🔓 字体解密: ${tHashes.size} 个乱码字符,正在对比常用字字形...`, 'info');
-    const resolved = new Map();
-    const start = Date.now();
-    outer:
-    for (let ci = 0; ci < COMMON_CHARS.length; ci++) {
-      const ch = COMMON_CHARS[ci];
-      if (resolved.size < tHashes.size) {
-        const bits = glyphBits(ch);
-        for (const [target, thash] of tHashes) {
-          if (!resolved.has(target) && bits === thash) {
-            resolved.set(target, ch);
-            if (resolved.size >= tHashes.size) break outer;
-          }
-        }
-      }
-      if (Date.now() - start > 10000) { log('字体解密超时,部分字符可能未映射', 'warn'); break; }
-    }
-    if (!resolved.size) { log('字体解密未能匹配(可能含非常用字),跳过自动作答', 'warn'); return false; }
+
+    const uniqueChars = new Set();
     els.forEach((el) => {
-      let text = String(el.textContent || '');
-      for (const [t, r] of resolved) text = text.split(t).join(r);
-      el.textContent = text;
+      for (const ch of String(el.textContent || '')) {
+        if (ch.trim()) uniqueChars.add(ch);
+      }
+    });
+
+    const encryptedChars = [];
+    let normalCount = 0;
+
+    if (font) {
+      for (const ch of uniqueChars) {
+        const gid = MiniTypr.codeToGlyph(font, ch.charCodeAt(0));
+        if (!gid) normalCount++;
+        else encryptedChars.push(ch);
+      }
+    } else {
+      uniqueChars.forEach((ch) => encryptedChars.push(ch));
+    }
+
+    if (encryptedChars.length === 0) {
+      els.forEach((el) => el.classList.remove('font-cxsecret'));
+      log(`🔓 字体检查完成:无实际加密字(${normalCount} 个普通字保持不变)`, 'ok');
+      return true;
+    }
+
+    const resolved = await recognizeGlyphsViaVisionAI(encryptedChars, b64);
+    const unresolvedFinal = encryptedChars.filter((c) => !resolved.has(c));
+
+    els.forEach((el) => {
+      let html = el.innerHTML;
+      for (const [srcCh, dstCh] of resolved) {
+        html = html.split(srcCh).join(dstCh);
+      }
+      for (const uCh of unresolvedFinal) {
+        html = html.split(uCh).join('[?]');
+      }
+      el.innerHTML = html;
       el.classList.remove('font-cxsecret');
     });
-    log(`🔓 字体解密完成,还原 ${resolved.size} 个字符`, 'ok');
+
+    if (unresolvedFinal.length > 0) {
+      const ratio = resolved.size / encryptedChars.length;
+      if (CONFIG.aiEnabled && CONFIG.aiKey && (ratio >= 0.8 || unresolvedFinal.length <= 6)) {
+        log(`⚠ 字体解密还原 ${resolved.size}/${encryptedChars.length} 字(剩余 ${unresolvedFinal.length} 字标为 [?]),启用 AI 上下文推理继续作答`, 'warn');
+        return true;
+      }
+      log(`⚠ 字体解密不完整:仅还原 ${resolved.size}/${encryptedChars.length} 个加密字(其余 ${normalCount} 个普通字不变),已中止自动提交`, 'warn');
+      return false;
+    }
+
+    log(`🔓 字体解密 100% 完成:精准还原 ${resolved.size}/${encryptedChars.length} 个加密字(其余 ${normalCount} 个普通字保持不变)`, 'ok');
     return true;
   }
 
   /* ==================== 视频弹题处理 ==================== */
   const QUIZ_SELECTORS = ['.TiMu', '.topic-item', '.ans-videoquiz', '.ans-topic', '#subtitle .TiMu', '.el-dialog .TiMu', '.popContent .TiMu', '.maskDiv .TiMu'];
 
-  // 启发式:找"题干特征 + 2~8 个选项控件"的可见容器
   function heuristicFindQuiz(win) {
     let best = null;
     let bestLen = Infinity;
@@ -1127,16 +1352,14 @@
     return best;
   }
 
-  // 启发式提取:判断题(对/错双选项)与单选
   function extractHeuristicQuestion(el) {
     try {
       const optNodes = Array.from(el.querySelectorAll('li'));
       const opts = optNodes.map((li) => clean(li.textContent))
         .filter((t) => t && t.length < 80 && !/(提交|继续学习|回看|确定|下一题|上一题|提交中)/.test(t));
       let type = '0';
-      // 判断题:两个选项,去掉"A、"这类前缀后是 对/错
       const norm = (t) => String(t).replace(/^[A-Ha-h][、.．:)\s]+/, '').trim();
-      if (opts.length === 2 && /^(正确|对|√|错误|错|×)$/.test(norm(opts[0])) && /^(正确|对|√|错误|错|×)$/.test(norm(opts[1]))) type = '3';
+      if (opts.length === 2 && /^(正确|对|√|True|true|错误|错|×|False|false)$/.test(norm(opts[0])) && /^(正确|对|√|True|true|错误|错|×|False|false)$/.test(norm(opts[1]))) type = '3';
       let text = String(el.textContent || '');
       for (const o of opts) text = text.split(o).join('');
       text = cl(clean(text)).replace(/[（(]\s*[)）]\s*$/, '').slice(0, 300);
@@ -1145,7 +1368,6 @@
     } catch (e) { return null; }
   }
 
-  // 启发式作答:判断题按语义点击,选择题按索引点击
   function setHeuristicAnswer(answerArr, q, el) {
     try {
       if (String(q.type) === '3') {
@@ -1153,27 +1375,24 @@
         let wantTrue = /正确|对|√|True|true|T|是/.test(ans);
         let wantFalse = /错误|错|×|False|false|F|否/.test(ans);
         if (!wantTrue && !wantFalse) return false;
-        // 拟人:按配置概率故意答错(真人不会全对)
         if (CONFIG.deliberateErrorRate > 0 && Math.random() < CONFIG.deliberateErrorRate) {
           const t = wantTrue; wantTrue = wantFalse; wantFalse = t;
           log('🎭 拟人模式:本题故意答错(配置概率)', 'info');
         }
         const normOpt = (t) => String(t).replace(/^[A-Ha-h][、.．:)\s]+/, '').trim();
         const nodes = Array.from(el.querySelectorAll('li, label, .option, div, span, a'))
-          .filter((n) => /^(正确|对|√|错误|错|×)$/.test(normOpt(clean(n.textContent))));
+          .filter((n) => /^(正确|对|√|True|true|错误|错|×|False|false)$/.test(normOpt(clean(n.textContent))));
         for (const n of nodes) {
           const t = normOpt(clean(n.textContent));
-          const isTrueOpt = /^(正确|对|√)$/.test(t);
+          const isTrueOpt = /^(正确|对|√|True|true)$/.test(t);
           if ((wantTrue && isTrueOpt) || (wantFalse && !isTrueOpt)) {
-            try { const inp = n.querySelector('input'); if (inp) inp.click(); } catch (e) { /* ignore */ }
-            try { n.click(); } catch (e) { /* ignore */ }
+            clickOptionNode(n);
           }
         }
         return nodes.length > 0;
       }
       let idx = matchAnswer(answerArr, q.options || []);
       if (!idx.length) return false;
-      // 拟人:单选按配置概率故意点一个错误选项
       if (CONFIG.deliberateErrorRate > 0 && Math.random() < CONFIG.deliberateErrorRate && (q.options || []).length > 1) {
         const wrongIdx = [];
         for (let i = 0; i < q.options.length; i++) if (!idx.includes(i)) wrongIdx.push(i);
@@ -1185,16 +1404,12 @@
       const lis = Array.from(el.querySelectorAll('li'));
       if (!lis.length) return false;
       lis.forEach((li, i) => {
-        if (idx.includes(i)) {
-          try { const inp = li.querySelector('input'); if (inp) inp.click(); } catch (e) { /* ignore */ }
-          try { li.click(); } catch (e) { /* ignore */ }
-        }
+        if (idx.includes(i)) clickOptionNode(li);
       });
       return true;
     } catch (e) { return false; }
   }
 
-  // 弹题"已处理"标记有效期:60 秒后过期,支持"答错→回看→重弹"场景的重新作答
   function wasHandledRecently(el) {
     return !!el.__cxHandledAt && (Date.now() - el.__cxHandledAt < 60000);
   }
@@ -1218,23 +1433,14 @@
       let q = extractQuizQuestion(container);
       const fromHeuristic = !q || !q.question;
       if (fromHeuristic) q = extractHeuristicQuestion(container);
-      if (!q || !q.question) {
-        log('⚠ 发现疑似弹题但无法解析题目,已记录 DOM', 'warn');
-        log('DOM: ' + String(container.outerHTML).slice(0, 1500), 'info');
-        continue;
-      }
-      if (!container.__cxDomLogged) {
-        container.__cxDomLogged = true;
-        log('DOM侦察: ' + String(container.outerHTML).slice(0, 1500), 'info');
-      }
+      if (!q || !q.question) continue;
       log(`❓ 检测到视频弹题${fromHeuristic ? '(启发式)' : ''}: ${q.question.slice(0, 40)}...`, 'warn');
-      await sleep(0.2); // 极速:不等待
+      await sleep(0.2);
       const answers = await getAnswers(q);
       const ok = setHeuristicAnswer(answers, q, container);
-      recordQuestion(q, answers);  // 收集弹题进题库
+      recordQuestion(q, answers);
       log(ok ? '弹题已作答,继续播放' : '弹题未能作答,尝试直接继续', ok ? 'ok' : 'warn');
-      await sleep(0.3); // 极速:答完立即继续
-      // 精确优先:先点"继续学习"(视频弹题专用),再兜底其他常见按钮
+      await sleep(0.3);
       if (!clickButtonByText(win, ['继续学习'])) {
         clickButtonByText(win, ['确定', '提交', '下一题', '关闭', '继续', '我知道了']);
       }
@@ -1244,7 +1450,7 @@
     return false;
   }
 
-  /* ==================== 每日刷课时长统计(纪律) ==================== */
+  /* ==================== 每日刷课时长统计 ==================== */
   function getTodayStats() {
     try {
       const s = (typeof GM_getValue !== 'undefined')
@@ -1263,9 +1469,92 @@
   }
   let dailyLimitReached = false;
 
+  /* ==================== 任务点完成检测与视频条件检测 ==================== */
+  // 检测单个任务点是否已被学习通标记为完成
+  function isTaskFinished(parentEl, iframe) {
+    try {
+      if (parentEl) {
+        if (parentEl.classList && parentEl.classList.contains('ans-job-finished')) return true;
+        const icon = parentEl.querySelector('.ans-job-icon');
+        if (icon && (icon.classList.contains('ans-job-finished') || /已完成/.test(icon.getAttribute('title') || '') || /已完成/.test(icon.textContent || ''))) return true;
+      }
+      if (iframe && iframe.contentWindow) {
+        const w = iframe.contentWindow;
+        if (typeof w.isUnFinishJob === 'function' && !w.isUnFinishJob()) return true;
+        const innerF = w.document && w.document.querySelector('iframe');
+        if (innerF && innerF.contentWindow) {
+          const iw = innerF.contentWindow;
+          if (iw.document && !iw.document.querySelector('button, .btnBlue, .jb_btn') && /已完成|成绩|重做|查看详情/.test(iw.document.body ? iw.document.body.textContent : '')) {
+            return true;
+          }
+        }
+      }
+    } catch (e) { /* ignore */ }
+    return false;
+  }
+
+  // 检测视频任务点的完成条件是否允许拖拽进度条(仅限「观看时长需 ≥ 总时长的 90%」且无「不可拖拽」字样)
+  function canDragThisVideo(iframe, parentEl, cardsWin) {
+    if (!CONFIG.dragVideoProgress) return false;
+    try {
+      const texts = [];
+      if (parentEl) texts.push(parentEl.textContent || '');
+      if (parentEl && parentEl.parentElement) texts.push(parentEl.parentElement.textContent || '');
+      if (iframe && iframe.contentDocument && iframe.contentDocument.body) {
+        texts.push(iframe.contentDocument.body.textContent || '');
+      }
+      if (cardsWin && cardsWin.document) {
+        const condNodes = cardsWin.document.querySelectorAll('.ans-job-ct, .ans-cc, [class*="condition"], [class*="job"]');
+        condNodes.forEach((n) => texts.push(n.textContent || ''));
+      }
+      const combined = texts.join(' ').replace(/\s+/g, ' ');
+      // 如果明确包含不可拖拽/禁止拖拽/不能拖拽,直接禁止
+      if (/不可拖拽|禁止拖拽|不能拖拽|不可快进|禁止快进/.test(combined)) {
+        log('🔒 检测到「当前视频不可拖拽」限制,保持稳妥倍速播放', 'info');
+        return false;
+      }
+      // 检查播放器底层属性 enableFastForward
+      if (iframe) {
+        const dataAttr = iframe.getAttribute('data') || '';
+        if (/"enableFastForward"\s*:\s*0/.test(dataAttr)) {
+          log('🔒 播放器属性禁止快进拖拽,保持稳妥倍速播放', 'info');
+          return false;
+        }
+      }
+      // 匹配完成条件 90%
+      if (/90\s*%/.test(combined)) {
+        log('⏩ 检测到完成条件为「时长 ≥ 90%」且允许拖拽,启用进度条跳跃策略', 'ok');
+        return true;
+      }
+    } catch (e) { /* ignore */ }
+    return false;
+  }
+
   /* ==================== 任务点处理 ==================== */
-  async function videoTask(iframe, outerWin) {
-    // 每日时长上限检查
+ // 绕过「观看时不可离开或将页面最小化」检测:屏蔽失焦、最小化、鼠标移出窗口导致的自动暂停
+  function enableBackgroundPlay(targetWin) {
+    if (!targetWin || targetWin.__cxBgHooked) return;
+    targetWin.__cxBgHooked = true;
+    try {
+      const doc = targetWin.document;
+      Object.defineProperty(doc, 'hidden', { configurable: true, get: () => false });
+      Object.defineProperty(doc, 'visibilityState', { configurable: true, get: () => 'visible' });
+      Object.defineProperty(doc, 'webkitHidden', { configurable: true, get: () => false });
+      doc.hasFocus = () => true;
+      targetWin.hasFocus = () => true;
+      const blockEvents = ['visibilitychange', 'webkitvisibilitychange', 'blur', 'focusout', 'mouseleave', 'mouseout', 'pagehide'];
+      for (const ev of blockEvents) {
+        targetWin.addEventListener(ev, (e) => { e.stopImmediatePropagation(); e.stopPropagation(); }, true);
+        doc.addEventListener(ev, (e) => { e.stopImmediatePropagation(); e.stopPropagation(); }, true);
+      }
+      if (doc.body) {
+        doc.body.addEventListener('mouseout', (e) => { e.stopImmediatePropagation(); e.stopPropagation(); }, true);
+        doc.body.addEventListener('mouseleave', (e) => { e.stopImmediatePropagation(); e.stopPropagation(); }, true);
+      }
+    } catch (e) { /* ignore */ }
+  }
+
+  async function videoTask(iframe, outerWin, parentEl = null, forceSafeMode = false) {
     if (CONFIG.dailyLimitMinutes > 0) {
       const st = getTodayStats();
       if (st.minutes >= CONFIG.dailyLimitMinutes) {
@@ -1277,14 +1566,30 @@
     }
     await waitIframeLoaded(iframe);
     const win = iframe.contentWindow;
+    // 对顶层窗口、章节卡片窗口、视频播放器窗口同时注入防离开/防最小化保护
+    enableBackgroundPlay(window);
+    enableBackgroundPlay(outerWin);
+    enableBackgroundPlay(win);
     await waitElementLoaded(win, '#video_html5_api', 90000);
     let player = null;
     try { player = win.videojs('video_html5_api'); } catch (e) { /* ignore */ }
     if (!player) { log('无法获取播放器对象,跳过', 'err'); return; }
+
+    // 若是保底重播模式,先将视频进度重置回 0
+    if (forceSafeMode) {
+      try { player.currentTime(0); } catch (e) { /* ignore */ }
+    }
+
     try { player.muted(true); } catch (e) { /* ignore */ }
     try { player.playbackRate(CONFIG.speed); } catch (e) { /* ignore */ }
     try { player.play(); } catch (e) { /* ignore */ }
-    log(`▶ 开始播放视频(静音, ${CONFIG.speed}x 原速)`, 'ok');
+
+    const allowDrag = !forceSafeMode && canDragThisVideo(iframe, parentEl, outerWin);
+    log(`▶ 开始播放视频(静音, ${CONFIG.speed}x 倍速${allowDrag ? ', 智能跳进度已就绪' : ''}${forceSafeMode ? ', 保底完整重播' : ''})`, 'ok');
+
+    let dragAttempted = false;
+    const playStartAt = Date.now();
+
     await new Promise((resolve) => {
       let finished = false;
       let timer = null;
@@ -1300,23 +1605,50 @@
         quizBusy = true;
         try {
           if (player.paused()) {
-            // 暂停 = 大概率是弹题,先在三个窗口里找题目(播放器iframe/章节iframe/顶层)
             await tryPopupQuiz([win, outerWin, window], player);
           }
+          // 若用户手动切换了章节导致当前视频 iframe 已脱离页面或已暂停,立即静默退出
+          if (PAUSED || !iframe.isConnected || !win || !win.document) {
+            finish();
+            return;
+          }
           if (typeof win.isUnFinishJob === 'function' && !win.isUnFinishJob()) {
-            log('学习通报告本任务点已完成', 'ok');
+            log('学习通报告本视频任务点已完成', 'ok');
             finish();
             return;
           }
           if (player.paused()) {
             try { player.play(); } catch (e) { /* ignore */ }
           }
+
+          // 条件性拖动视频进度条:在前 10% 内正常播放满 6 秒后,随机跳到 90.5% ~ 93.5%
+          if (allowDrag && !dragAttempted) {
+            const dur = typeof player.duration === 'function' ? player.duration() : 0;
+            const cur = typeof player.currentTime === 'function' ? player.currentTime() : 0;
+            if (dur > 30 && cur > 0 && (Date.now() - playStartAt >= 6000 || cur >= dur * 0.03)) {
+              dragAttempted = true;
+              if (cur < dur * 0.85) {
+                const targetRatio = 0.905 + Math.random() * 0.03; // 90.5% ~ 93.5%
+                const targetSec = Math.floor(dur * targetRatio);
+                log(`⏩ 从前 10% (${Math.round((cur / dur) * 100)}%) 随机拖动进度条至 ${(targetRatio * 100).toFixed(1)}% (${targetSec}s / ${Math.round(dur)}s)...`, 'info');
+                try { player.currentTime(targetSec); } catch (e) { /* ignore */ }
+                await sleep(1.8);
+                const afterCur = typeof player.currentTime === 'function' ? player.currentTime() : 0;
+                if (afterCur < dur * 0.85) {
+                  log('⚠ 进度条被平台拉回,已自动回退为稳妥倍速播放策略', 'warn');
+                } else {
+                  log(`✓ 进度条成功跳至 ${Math.round((afterCur / dur) * 100)}%,按 ${CONFIG.speed}x 继续播放至结束`, 'ok');
+                }
+                try { player.playbackRate(CONFIG.speed); player.play(); } catch (e) { /* ignore */ }
+              }
+            }
+          }
         } catch (e) { /* ignore */ }
         quizBusy = false;
       }, 2000);
       try { player.on('ended', () => { log('视频播放结束', 'ok'); finish(); }); } catch (e) { /* ignore */ }
     });
-    // 累加今日刷课时长(按视频实际时长折算)
+
     try {
       const dur = typeof player.duration === 'function' ? player.duration() : 0;
       if (dur > 0) {
@@ -1326,7 +1658,6 @@
         log(`⏱ 今日累计刷课约 ${st.minutes} 分钟`, 'info');
       }
     } catch (e) { /* ignore */ }
-    log('✓ 视频任务完成');
   }
 
   async function audioTask(iframe) {
@@ -1336,16 +1667,16 @@
     const audio = win.document.getElementById('audio_html5_api');
     audio.muted = true;
     audio.volume = 0;
-    try { audio.play().catch(() => { /* 首次可能需要用户点击页面 */ }); } catch (e) { /* ignore */ }
+    try { audio.play().catch(() => {}); } catch (e) { /* ignore */ }
     log('♪ 开始播放音频(静音)', 'ok');
     await new Promise((resolve) => {
       const timer = setInterval(() => {
         if (audio.ended) { clearInterval(timer); resolve(); return; }
-        if (audio.paused) { try { audio.play().catch(() => { /* ignore */ }); } catch (e) { /* ignore */ } }
+        if (audio.paused) { try { audio.play().catch(() => {}); } catch (e) { /* ignore */ } }
       }, 2000);
       audio.addEventListener('ended', () => { clearInterval(timer); resolve(); });
     });
-    log('✓ 音频任务完成');
+    log('✓ 音频任务播放结束');
   }
 
   async function pdfTask(iframe) {
@@ -1362,11 +1693,10 @@
         win.scrollTo(0, win.document.body.scrollHeight);
       }
     } catch (e) { /* ignore */ }
-    await sleep(1);
+    await sleep(1.5);
     log('✓ 文档任务处理完成');
   }
 
-  // 图片任务点:没有视频,打开后"看完"图片即完成(停留 + 轻微滚动模拟查看)
   async function imageTask(iframe) {
     await waitIframeLoaded(iframe);
     const win = iframe.contentWindow;
@@ -1380,7 +1710,56 @@
     log('✓ 图片任务处理完成');
   }
 
-  async function workTask(iframe) {
+  /* ==================== 章节测验二次确认弹窗处理 (区分图2与图3) ==================== */
+  async function handleSubmitConfirmModal(wins, workWin) {
+    await sleep(1.5);
+    for (const w of wins) {
+      if (!w || !w.document) continue;
+      let modals = [];
+      try {
+        modals = Array.from(w.document.querySelectorAll('.popDiv, .maskDiv, .el-dialog, .el-message-box, .layui-layer, .ans-modal, [role="dialog"], div'));
+      } catch (e) { continue; }
+
+      for (const m of modals) {
+        if (!isVisible(m)) continue;
+        const txt = clean(m.textContent || '');
+        if (txt.length < 4 || txt.length > 300) continue;
+        if (!/确认提交|确定提交|是否提交/.test(txt)) continue;
+
+        // 筛选最小外层弹窗容器(同时含文本与提交/取消按钮)
+        const btns = Array.from(m.querySelectorAll('a, button, span, div, input[type=button]')).filter((b) => {
+          if (!isVisible(b)) return false;
+          const bt = (b.textContent || b.value || '').trim();
+          return /^(提交|确定|确认|取消)$/.test(bt);
+        });
+        if (!btns.length) continue;
+
+        // 图3情形:包含“您还有未做完的...”等提示 → 严禁提交,自动点取消并暂存
+        if (/还有.*未做完|未做完的|未完成|还有.*未答|未作答/.test(txt)) {
+          log(`⚠ 弹窗警告:「${txt.replace(/提示|\s+/g, ' ').trim()}」——检测到未做完题目,禁止交卷!`, 'err');
+          const cancelBtn = btns.find((b) => /^(取消)$/.test((b.textContent || b.value || '').trim()));
+          if (cancelBtn) { try { cancelBtn.click(); } catch (e) {} }
+          try { if (workWin && typeof workWin.noSubmit === 'function') workWin.noSubmit(); } catch (e) {}
+          return 'aborted_unfinished';
+        }
+
+        // 图2情形:正常“确认提交？” → 点击“提交”/“确定”
+        const confirmBtn = btns.find((b) => /^(提交|确定|确认)$/.test((b.textContent || b.value || '').trim()));
+        if (confirmBtn) {
+          log('📤 检测到交卷确认弹窗(全部题目已作答),自动点击「提交」', 'ok');
+          try { confirmBtn.click(); } catch (e) {}
+          await sleep(1);
+          try { if (workWin && typeof workWin.submitCheckTimes === 'function') workWin.submitCheckTimes(); } catch (e) {}
+          return 'confirmed';
+        }
+      }
+    }
+    // 兜底:部分老版本直接调用 submitCheckTimes
+    try { if (workWin && typeof workWin.submitCheckTimes === 'function') workWin.submitCheckTimes(); } catch (e) {}
+    return 'fallback';
+  }
+
+  async function workTask(iframe, cardsWin = null) {
     await waitIframeLoaded(iframe);
     const outerWin = iframe.contentWindow;
     let innerIframe = null;
@@ -1391,14 +1770,13 @@
     await waitElementLoaded(win, '.TiMu, .questionLi', 30000);
     if (win.document.querySelector('.font-cxsecret')) {
       log('🔐 测验检测到字体加密,正在自动解密...', 'warn');
-      await decodeFont(win);
-      if (win.document.querySelector('.font-cxsecret')) {
-        log('⚠ 字体解密未成功,跳过自动作答(不会乱提交)', 'warn');
+      const decOk = await decodeFont(win);
+      if (!decOk) {
+        log('⚠ 字体解密未完全成功,跳过自动作答(暂存不乱提交)', 'warn');
         try { win.alert = () => {}; if (typeof win.noSubmit === 'function') win.noSubmit(); } catch (e) { /* ignore */ }
         return;
       }
     }
-    // 双结构:老版章节测验(.TiMu)/ 新版内嵌作业(.questionLi,如 doHomeWorkNew)
     let els = Array.from(win.document.querySelectorAll('.TiMu'));
     let workStyle = false;
     if (!els.length) {
@@ -1418,29 +1796,42 @@
       await randomSleep(CONFIG.answerIntervalMin, CONFIG.answerIntervalMax);
       const answers = await getAnswers(q);
       const ok = setQuizAnswer(answers, q, el, win);
-      recordQuestion(q, answers);  // 收集测验题进题库
+      recordQuestion(q, answers);
       if (ok) okCount++;
-      log(`第 ${i + 1}/${tasks.length} 题(类型 ${q.type}) ${ok ? '✓ 已作答' : '✗ 无答案'}`, ok ? 'ok' : 'warn');
+      log(`第 ${i + 1}/${tasks.length} 题(类型 ${q.type}) ${ok ? '✓ 已作答' : '✗ 无答案或未选中'}`, ok ? 'ok' : 'warn');
     }
-    const accuracy = tasks.length ? okCount / tasks.length : 0;
-    if (CONFIG.autoSubmit && accuracy >= CONFIG.minAccuracy) {
+    const coverage = tasks.length ? okCount / tasks.length : 0;
+    // 若有任何题目未能成功选中作答,直接暂存不点提交(双重保险防漏答交卷)
+    if (okCount < tasks.length) {
+      log(`⚠ 还有 ${tasks.length - okCount} 道题未完成作答,为防漏题交卷已自动暂存`, 'warn');
+      try { win.alert = () => {}; if (typeof win.noSubmit === 'function') win.noSubmit(); } catch (e) { /* ignore */ }
+      return;
+    }
+    if (CONFIG.autoSubmit && coverage >= CONFIG.minAccuracy) {
       await randomSleep(CONFIG.submitDelayMin, CONFIG.submitDelayMax);
-      log(`正确率 ${Math.round(accuracy * 100)}%,正在提交...`, 'ok');
+      log(`作答覆盖率 ${Math.round(coverage * 100)}%,正在触发提交...`, 'ok');
       let submitted = false;
-      try {
-        if (typeof win.btnBlueSubmit === 'function') { win.btnBlueSubmit(); submitted = true; }
-        else if (typeof win.submitWork === 'function') { win.submitWork(); submitted = true; }
-      } catch (e) { /* ignore */ }
-      if (!submitted) submitted = clickButtonByText(win, ['交卷', '提交', '确认提交']);
+      // 先点击页面上的“提交”按钮以弹出确认框(图2/图3),若无按钮再调函数
+      submitted = clickButtonByText(win, ['提交', '交卷', '确认提交']);
+      if (!submitted) {
+        try {
+          if (typeof win.btnBlueSubmit === 'function') { win.btnBlueSubmit(); submitted = true; }
+          else if (typeof win.submitWork === 'function') { win.submitWork(); submitted = true; }
+        } catch (e) { /* ignore */ }
+      }
       if (submitted) {
-        await sleep(3);
-        try { if (typeof win.submitCheckTimes === 'function') win.submitCheckTimes(); } catch (e) { /* ignore */ }
-        log('已触发提交', 'ok');
+        const res = await handleSubmitConfirmModal([win, outerWin, cardsWin, window], win);
+        if (res === 'aborted_unfinished') {
+          log('已取消交卷并暂存答案', 'warn');
+        } else {
+          await sleep(2);
+          log('✓ 测验已确认提交', 'ok');
+        }
       } else {
         log('未找到提交入口,请手动提交', 'warn');
       }
     } else {
-      log(`正确率 ${Math.round(accuracy * 100)}% 低于阈值 ${Math.round(CONFIG.minAccuracy * 100)}%,暂存不提交`, 'warn');
+      log(`作答覆盖率 ${Math.round(coverage * 100)}% 低于阈值 ${Math.round(CONFIG.minAccuracy * 100)}%,暂存不提交`, 'warn');
       try { win.alert = () => {}; if (typeof win.noSubmit === 'function') win.noSubmit(); } catch (e) { /* ignore */ }
     }
   }
@@ -1450,7 +1841,11 @@
     await waitElementLoaded(window, '.questionLi', 30000);
     if (window.document.querySelector('.font-cxsecret')) {
       log('🔐 作业检测到字体加密,正在自动解密...', 'warn');
-      await decodeFont(window);
+      const decOk = await decodeFont(window);
+      if (!decOk) {
+        log('⚠ 作业字体解密不完整,停止自动填写以免填入乱码答案', 'warn');
+        return;
+      }
     }
     const els = Array.from(document.querySelectorAll('.questionLi'));
     if (!els.length) { log('未找到作业题目', 'warn'); return; }
@@ -1469,11 +1864,79 @@
     log(`作业填写完成(${okCount}/${els.length}),请人工检查后手动提交`);
   }
 
-  /* ==================== 章节主循环 ==================== */
+  /* ==================== 同小节多标签页(如「1 内容」「2 作业」)识别与切换 ==================== */
+  function isTabActive(el) {
+    if (!el) return false;
+    const cls = (el.className || '') + ' ' + (el.parentElement ? el.parentElement.className || '' : '');
+    if (/(^|\s)(active|cur|current|on|selected|ans-tab-active|prev_cur)(\s|$)/i.test(cls)) return true;
+    try {
+      const cs = el.ownerDocument.defaultView.getComputedStyle(el);
+      const bg = cs.backgroundColor || '';
+      // 图1激活态为蓝色胶囊按钮(rgb(58, 139, 255) 等高亮背景)
+      const m = bg.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+      if (m) {
+        const r = Number(m[1]), g = Number(m[2]), b = Number(m[3]);
+        if (b > 180 && r < 120) return true;
+      }
+    } catch (e) { /* ignore */ }
+    return false;
+  }
+
+  // 在顶层 document 和章节 cardsWin 中查找同小节的顶部卡片标签组
+  function findNextSubTab(cardsWin) {
+    const docs = [document];
+    if (cardsWin && cardsWin.document) docs.push(cardsWin.document);
+
+    for (const doc of docs) {
+      // 1) 标准学习通顶部卡片选择器
+      const stdSelectors = [
+        '.prev_ul li',
+        '#prev_tab li',
+        '.tabtags span',
+        '.tabtags li',
+        '.ans-cc-tab li',
+        '.card_tab li'
+      ];
+      for (const sel of stdSelectors) {
+        const list = Array.from(doc.querySelectorAll(sel)).filter(isVisible);
+        if (list.length >= 2) {
+          const curIdx = list.findIndex(isTabActive);
+          if (curIdx >= 0 && curIdx + 1 < list.length) {
+            return list[curIdx + 1];
+          }
+        }
+      }
+
+      // 2) 启发式匹配图1样式的「1 内容」「2 作业」同级标签组
+      const candidates = Array.from(doc.querySelectorAll('li, span, a, div, button')).filter((el) => {
+        if (!isVisible(el)) return false;
+        if (el.children.length > 3) return false;
+        const t = (el.textContent || '').trim();
+        return /^\d+\s*\S+$/.test(t) && t.length <= 15;
+      });
+      for (const c of candidates) {
+        const parent = c.parentElement;
+        if (!parent) continue;
+        const siblings = Array.from(parent.children).filter((s) => {
+          if (!isVisible(s)) return false;
+          const st = (s.textContent || '').trim();
+          return /^\d+\s*\S+$/.test(st) && st.length <= 15;
+        });
+        if (siblings.length >= 2) {
+          const curIdx = siblings.findIndex(isTabActive);
+          if (curIdx >= 0 && curIdx + 1 < siblings.length) {
+            return siblings[curIdx + 1];
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  /* ==================== 章节主循环与保底重试 ==================== */
   let running = false;
   let lastIframeUrl = '';
 
-  // 通用:按可见文本点击元素(tab/按钮)
   function clickByText(win, texts) {
     const nodes = win.document.querySelectorAll('button, a, div, span, li');
     for (const n of nodes) {
@@ -1489,22 +1952,54 @@
     return false;
   }
 
-  // 切下一节:优先老版 .nextChapter,兜底新版"下一节"按钮
-  function clickNextSection() {
+  // 切下一节:点击后自动检测并确认「当前章节还有任务点未完成，是否去完成？」弹窗中的「下一节」按钮
+  async function clickNextSection(cardsWin = null) {
+    let clicked = false;
     const next = document.querySelector('.nextChapter');
-    if (next) { try { next.click(); } catch (e) { /* ignore */ } return true; }
-    const nodes = Array.from(document.querySelectorAll('button, a, div, span'));
-    for (const n of nodes) {
-      if ((n.textContent || '').trim() === '下一节') {
-        try { n.click(); } catch (e) { /* ignore */ }
-        return true;
+    if (next && isVisible(next)) {
+      try { next.click(); clicked = true; } catch (e) { /* ignore */ }
+    } else {
+      const nodes = Array.from(document.querySelectorAll('button, a, div, span'));
+      for (const n of nodes) {
+        if (!isVisible(n)) continue;
+        const t = (n.textContent || '').trim();
+        if (t === '下一节' || t === '下一章') {
+          try { n.click(); clicked = true; break; } catch (e) { /* ignore */ }
+        }
       }
     }
-    return false;
+    if (!clicked) return false;
+
+    // 延迟检测是否弹出「当前章节还有任务点未完成，是否去完成？ [去学习] [下一节]」拦截弹窗
+    for (const delay of [0.8, 1.0]) {
+      await sleep(delay);
+      const wins = [window];
+      if (cardsWin) wins.push(cardsWin);
+      for (const w of wins) {
+        if (!w || !w.document) continue;
+        const dialogs = Array.from(w.document.querySelectorAll('.popDiv, .maskDiv, .el-dialog, .el-message-box, .layui-layer, [role="dialog"], div')).filter((el) => {
+          if (!isVisible(el)) return false;
+          const txt = (el.textContent || '').trim();
+          return txt.length > 6 && txt.length < 250 && /还有任务点未完成|是否去完成|未完成任务点/.test(txt);
+        });
+        for (const dlg of dialogs) {
+          const btns = Array.from(dlg.querySelectorAll('a, button, span, div, input[type=button]')).filter(isVisible);
+          const forceNextBtn = btns.find((b) => /^(下一节|下一章|继续|确定)$/.test((b.textContent || b.value || '').trim()));
+          if (forceNextBtn) {
+            log('⏭ 检测到「还有任务点未完成」拦截弹窗,自动点击「下一节」强制跳转', 'warn');
+            try { forceNextBtn.click(); } catch (e) { /* ignore */ }
+            return true;
+          }
+        }
+      }
+    }
+    return true;
   }
 
-  // 顶层弹题处理(2026 新版弹题直接渲染在顶层 document,选项是 radio)
   async function topLevelQuiz() {
+    if (document.querySelector('.font-cxsecret')) {
+      await decodeFont(window);
+    }
     const els = Array.from(document.querySelectorAll('.TiMu'));
     if (els.length) {
       log(`📝 检测到顶层测验(共 ${els.length} 题)`, 'ok');
@@ -1535,9 +2030,105 @@
     }
   }
 
-  // 新版知识卡片循环(2025-2026 knowledge/cards 结构:卡片内嵌视频/图片/检测模块,顶层切节)
-  async function newChapterLoop(cardsWin) {
-    log('🧭 检测到新版知识卡片结构,启用新适配', 'ok');
+  // 执行单个任务点并附带「完成状态检测 + 保底重试一次 + 失败红字警告跳过」
+  // 检查当前任务所属的章节卡片上下文是否仍然存活(未被人手切章或销毁)
+  function isCardContextAlive(cardsWin, startUrl, node = null) {
+    try {
+      if (PAUSED || dailyLimitReached) return false;
+      const topFrame = document.querySelector('#iframe');
+      if (!topFrame || topFrame.contentWindow !== cardsWin) return false;
+      if (!cardsWin || cardsWin.closed || !cardsWin.document) return false;
+      if (startUrl && cardsWin.location.href !== startUrl) return false;
+      if (node && !node.isConnected) return false;
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  // 执行单个任务点并附带「完成状态检测 + 保底重试一次 + 失败红字警告跳过」
+  async function runSingleJobWithVerify(icon, cardsWin, startUrl) {
+    if (!isCardContextAlive(cardsWin, startUrl, icon)) return;
+    const parent = icon.parentElement;
+    if (isTaskFinished(parent, null)) return;
+    const iframe = parent ? parent.querySelector('iframe') : null;
+    if (!iframe) { log('任务点无 iframe,跳过', 'warn'); return; }
+
+    let info = {};
+    try { info = JSON.parse(iframe.getAttribute('data') || '{}'); } catch (e) { /* ignore */ }
+    const src = iframe.src || '';
+    const taskName = info.name || info.title || src.slice(-36) || '未知任务点';
+
+    const executeTaskOnce = async (isRetry) => {
+      if (src.includes('/ananas/modules/video/index.html')) {
+        if (!CONFIG.autoVideo) { log('视频任务已跳过(配置关闭)'); return 'skipped'; }
+        await videoTask(iframe, cardsWin, parent, isRetry);
+        return 'ran';
+      } else if (src.includes('/ananas/modules/audio/index.html')) {
+        if (!CONFIG.autoAudio) { log('音频任务已跳过(配置关闭)'); return 'skipped'; }
+        await audioTask(iframe);
+        return 'ran';
+      } else if (src.includes('/ananas/modules/work/index.html')) {
+        if (!CONFIG.autoWork) { log('测验任务已跳过(配置关闭)'); return 'skipped'; }
+        await workTask(iframe, cardsWin);
+        return 'ran';
+      } else if (src.includes('/ananas/modules/pdf/index.html')) {
+        await pdfTask(iframe);
+        return 'ran';
+      } else if (src.includes('/ananas/modules/img/') || src.includes('/ananas/modules/image/') || src.includes('/ananas/modules/picture/') || /img.*index\.html/.test(src)) {
+        await imageTask(iframe);
+        return 'ran';
+      } else {
+        log('未知任务类型: ' + src, 'warn');
+        return 'skipped';
+      }
+    };
+
+    log(`开始任务点: ${taskName}`);
+    try {
+      const st = await executeTaskOnce(false);
+      if (st === 'skipped') return;
+    } catch (e) {
+      if (!isCardContextAlive(cardsWin, startUrl, iframe)) return;
+      log(`任务执行异常: ${e.message}`, 'err');
+    }
+
+    // 若在任务执行期间用户手动切换了章节或暂停,直接静默退出,不触发保底重试与报错
+    if (!isCardContextAlive(cardsWin, startUrl, iframe)) {
+      log(`ℹ 检测到章节已手动切换或暂停,中止旧任务「${taskName}」`, 'info');
+      return;
+    }
+
+    // 等待 2.5 秒让学习通更新 DOM 任务点完成状态
+    await sleep(2.5);
+    if (!isCardContextAlive(cardsWin, startUrl, iframe)) return;
+    if (isTaskFinished(parent, iframe)) {
+      log(`✓ 任务点已完成确认: ${taskName}`, 'ok');
+      return;
+    }
+
+    // 第一次未完成 → 启动保底策略重试一次(视频强制关闭进度条拖动,从头按倍速完整播完)
+    log(`⚠ 任务点「${taskName}」尚未标记完成,启动保底策略重新尝试一次...`, 'warn');
+    try {
+      await executeTaskOnce(true);
+    } catch (e) {
+      if (!isCardContextAlive(cardsWin, startUrl, iframe)) return;
+      log(`保底重试异常: ${e.message}`, 'err');
+    }
+
+    await sleep(2.5);
+    if (!isCardContextAlive(cardsWin, startUrl, iframe)) return;
+    if (isTaskFinished(parent, iframe)) {
+      log(`✓ 保底重试成功,任务点已完成: ${taskName}`, 'ok');
+    } else {
+      setStatus('工作中(有未完成警告)', true);
+      log(`❌ [未完成警告] 任务点「${taskName}」保底重试后仍未完成!请人工检查,已跳过并继续运行`, 'err');
+    }
+  }
+
+  // 扫描并执行当前激活卡片标签页内的所有任务点
+  async function newChapterLoop(cardsWin, startUrl = '') {
+    log('🧭 检测到无传统任务点图标,尝试新版卡片或问卷/文本页适配...', 'info');
     const limitHit = () => {
       try {
         const txt = String(document.body ? document.body.textContent : '') + ' ' + String(cardsWin.document.body ? cardsWin.document.body.textContent : '');
@@ -1547,180 +2138,188 @@
     if (limitHit()) {
       log('⏹ 平台提示:今日视频任务点已达上限,跳过视频任务(明天恢复),只处理学习检测', 'warn');
     }
-    // 0) 顶层题目(新版弹题/判断题直接渲染在顶层 document)
+
     await topLevelQuiz();
-    // 1) 学习检测:点击 tab → 等 work iframe → 做题;若无 work iframe 则尝试顶层题目
+    if (!isCardContextAlive(cardsWin, startUrl)) return;
+
+    // 1) 检查是否有新版「学习检测 / 学习测验」标签
     if (CONFIG.autoWork) {
       const tabClicked = clickByText(cardsWin, ['学习检测', '学习测验']);
       if (tabClicked) {
         await sleep(2);
         let workFrame = null;
-        for (let i = 0; i < 20 && !workFrame; i++) {
+        for (let i = 0; i < 15 && !workFrame; i++) {
+          if (!isCardContextAlive(cardsWin, startUrl)) return;
           const fs = Array.from(cardsWin.document.querySelectorAll('iframe'));
           workFrame = fs.find((f) => /\/ananas\/modules\/work\//.test(String(f.src || ''))) || null;
           if (!workFrame) await sleep(1);
         }
         if (workFrame) {
-          await workTask(workFrame);
-          log('✓ 学习检测完成', 'ok');
+          await workTask(workFrame, cardsWin);
+          log('✓ 学习检测处理结束', 'ok');
         } else {
-          log('学习检测 tab 已点,但未找到 work iframe,尝试顶层题目', 'warn');
           await topLevelQuiz();
         }
       }
     }
-    // 2) 视频任务(平台未限流时)
-    if (!limitHit()) {
-      let videoFrame = null;
-      for (let i = 0; i < 20 && !videoFrame; i++) {
-        const fs = Array.from(cardsWin.document.querySelectorAll('iframe'));
-        videoFrame = fs.find((f) => /\/ananas\/modules\/video\//.test(String(f.src || ''))) || null;
-        if (!videoFrame) await sleep(1);
+
+    // 2) 检查是否存在视频/图片/文档模块 iframe(最多等待 3 秒,避免在问卷/纯文本页空等 20 秒)
+    let allFrames = [];
+    for (let i = 0; i < 3; i++) {
+      if (!isCardContextAlive(cardsWin, startUrl)) return;
+      try { allFrames = Array.from(cardsWin.document.querySelectorAll('iframe')); } catch (e) { allFrames = []; }
+      if (allFrames.length > 0) break;
+      await sleep(1);
+    }
+
+    if (!allFrames.length) {
+      log('ℹ 当前小节无内嵌任务模块(如评估问卷/导读页),直接跳过', 'ok');
+      return;
+    }
+
+    // 3) 视频模块处理
+    if (!limitHit() && CONFIG.autoVideo) {
+      const videoFrame = allFrames.find((f) => /\/ananas\/modules\/video\//.test(String(f.src || '')));
+      if (videoFrame) {
+        await videoTask(videoFrame, cardsWin, videoFrame.parentElement, false);
+        if (!isCardContextAlive(cardsWin, startUrl, videoFrame)) return;
+        await sleep(2.5);
+        if (!isTaskFinished(videoFrame.parentElement, videoFrame)) {
+          log('⚠ 视频任务点尚未标记完成,启动保底策略完整重播一次...', 'warn');
+          await videoTask(videoFrame, cardsWin, videoFrame.parentElement, true);
+          if (!isCardContextAlive(cardsWin, startUrl, videoFrame)) return;
+          await sleep(2.5);
+          if (!isTaskFinished(videoFrame.parentElement, videoFrame)) {
+            setStatus('工作中(有未完成警告)', true);
+            log('❌ [未完成警告] 当前小节视频任务点重试后仍未完成!已跳过并继续运行', 'err');
+          }
+        }
       }
-      if (videoFrame && CONFIG.autoVideo) {
-        await videoTask(videoFrame, cardsWin);
-      }
     }
-    // 3) 图片任务
-    {
-      const fs = Array.from(cardsWin.document.querySelectorAll('iframe'));
-      const imgFrame = fs.find((f) => /\/ananas\/modules\/(img|image|picture)\//.test(String(f.src || '')));
-      if (imgFrame) await imageTask(imgFrame);
-    }
-    // 3.5) PDF/文档任务(纯 PDF 单模块卡片,如 3.8 节)
-    {
-      const fs = Array.from(cardsWin.document.querySelectorAll('iframe'));
-      const pdfFrame = fs.find((f) => /\/ananas\/modules\/pdf\//.test(String(f.src || '')));
-      if (pdfFrame) await pdfTask(pdfFrame);
-    }
-    // 4) 切下一节
-    await sleep(0.3);
-    if (CONFIG.autoJump && clickNextSection()) {
-      log('→ 切换到下一节', 'ok');
-    } else {
-      log('未找到"下一节"按钮(可能已是最后一节)', 'warn');
-    }
+
+    // 4) 图片与 PDF 模块处理
+    const imgFrame = allFrames.find((f) => /\/ananas\/modules\/(img|image|picture)\//.test(String(f.src || '')));
+    if (imgFrame && isCardContextAlive(cardsWin, startUrl)) await imageTask(imgFrame);
+
+    const pdfFrame = allFrames.find((f) => /\/ananas\/modules\/pdf\//.test(String(f.src || '')));
+    if (pdfFrame && isCardContextAlive(cardsWin, startUrl)) await pdfTask(pdfFrame);
   }
 
-  async function chapterLoop() {
+  // 扫描并执行当前激活卡片标签页内的所有任务点
+  async function processCurrentCardTab() {
     await waitElementLoaded(window, '#iframe', 30000);
     const cardsIframe = document.querySelector('#iframe');
     await waitIframeLoaded(cardsIframe);
     let cardsWin = null;
-    try { cardsWin = cardsIframe.contentWindow; } catch (e) {
+    let startUrl = '';
+    try {
+      cardsWin = cardsIframe.contentWindow;
+      startUrl = cardsWin.location.href;
+    } catch (e) {
       log('章节 iframe 无法访问(跨域),请确认页面域名与脚本匹配', 'err');
-      return;
+      return null;
     }
     try { if (typeof window.scroll2Job === 'function') window.scroll2Job(); } catch (e) { /* ignore */ }
     const icons = cardsWin.document.querySelectorAll('.ans-job-icon');
     if (!icons.length) {
-      log('未找到任务点图标,尝试新版知识卡片模式处理...', 'warn');
-      // 结构侦察:输出卡片 iframe 信息,帮助定位新版页面结构
-      try {
-        const frames = Array.from(cardsWin.document.querySelectorAll('iframe'));
-        const srcs = frames.map((f) => String(f.src || f.getAttribute('data') || '').slice(0, 120));
-        log('🔍 侦察:卡片 iframe 共 ' + frames.length + ' 个,src 列表: ' + JSON.stringify(srcs), 'info');
-      } catch (e) {
-        log('🔍 侦察失败: ' + e.message, 'err');
-      }
-      // 降级:按新版知识卡片模式直接处理(纯 PDF/视频/图片单模块卡片也能过)
-      await newChapterLoop(cardsWin);
-      return;
+      log('当前卡片未找到传统任务点图标,尝试新版知识卡片模式处理...', 'info');
+      await newChapterLoop(cardsWin, startUrl);
+      return cardsWin;
     }
-    let finishedCount = 0;
     for (const icon of Array.from(icons)) {
-      if (PAUSED) { log('⏸ 已暂停,本轮任务停止(点面板 ▶ 恢复)', 'warn'); return; }
-      if (dailyLimitReached) { log('⏹ 今日刷课已到上限,停止任务处理', 'warn'); return; }
-      const parent = icon.parentElement;
-      if (parent && parent.classList.contains('ans-job-finished')) { finishedCount++; continue; }
-      const iframe = parent ? parent.querySelector('iframe') : null;
-      if (!iframe) { log('任务点无 iframe,跳过', 'warn'); continue; }
-      let info = {};
-      try { info = JSON.parse(iframe.getAttribute('data') || '{}'); } catch (e) { /* ignore */ }
-      const name = info.name || info.title || '';
-      const src = iframe.src || '';
-      log(`开始任务点: ${name || src.slice(-40)}`);
-      try {
-        if (src.includes('/ananas/modules/video/index.html')) {
-          if (CONFIG.autoVideo) await videoTask(iframe, cardsWin); else log('视频任务已跳过(配置关闭)');
-        } else if (src.includes('/ananas/modules/audio/index.html')) {
-          if (CONFIG.autoAudio) await audioTask(iframe); else log('音频任务已跳过(配置关闭)');
-        } else if (src.includes('/ananas/modules/work/index.html')) {
-          if (CONFIG.autoWork) await workTask(iframe); else log('测验任务已跳过(配置关闭)');
-        } else if (src.includes('/ananas/modules/pdf/index.html')) {
-          await pdfTask(iframe);
-        } else if (src.includes('/ananas/modules/img/') || src.includes('/ananas/modules/image/') || src.includes('/ananas/modules/picture/') || /img.*index\.html/.test(src)) {
-          await imageTask(iframe);
-        } else {
-          log('未知任务类型: ' + src, 'warn');
-          // 记录未知类型 src,方便识别新模块
-          log('🔍 未知模块 src 全文: ' + src, 'info');
-        }
-      } catch (e) {
-        log(`任务处理异常: ${e.message}`, 'err');
+      if (!isCardContextAlive(cardsWin, startUrl, icon)) {
+        return cardsWin;
       }
-      await sleep(0.3);
+      await runSingleJobWithVerify(icon, cardsWin, startUrl);
+      await sleep(0.5);
     }
-    log(`本章扫描结束(共 ${icons.length} 个任务点)`, 'ok');
-    if (CONFIG.autoJump) {
-      const next = document.querySelector('.nextChapter');
-      if (next) { log('→ 切换到下一章'); next.click(); }
-      else log('未找到下一章按钮(可能已是最后一章)', 'warn');
+    if (isCardContextAlive(cardsWin, startUrl)) {
+      log(`当前卡片扫描结束(共 ${icons.length} 个任务点)`, 'ok');
     }
+    return cardsWin;
+  }
+
+  // 完整章节循环:自动遍历同小节内多个顶部标签页(如「1 内容」「2 作业」),全部完成后再切下一节
+  async function chapterLoop() {
+    let tabGuard = 0;
+    let lastCardsWin = null;
+    while (tabGuard < 10) {
+      tabGuard++;
+      if (PAUSED || dailyLimitReached) return false;
+      lastCardsWin = await processCurrentCardTab();
+      if (PAUSED || dailyLimitReached) return false;
+
+      // 记录当前已处理完的卡片 URL
+      try {
+        const curF = document.querySelector('#iframe');
+        if (curF && curF.contentWindow) lastIframeUrl = curF.contentWindow.location.href;
+      } catch (e) { /* ignore */ }
+
+      // 检查同一小节顶部是否还有下一个未遍历的标签页(如「2 作业」)
+      const nextSubTab = findNextSubTab(lastCardsWin);
+      if (nextSubTab) {
+        const tabTitle = (nextSubTab.textContent || '').trim() || `第 ${tabGuard + 1} 标签页`;
+        log(`→ 切换同小节顶部标签页: 「${tabTitle}」`, 'ok');
+        try { nextSubTab.click(); } catch (e) { /* ignore */ }
+        await sleep(3);
+        continue;
+      }
+      break;
+    }
+
+    if (CONFIG.autoJump && !PAUSED && !dailyLimitReached) {
+      await sleep(0.5);
+      if (await clickNextSection(lastCardsWin)) {
+        log('→ 本小节全部标签页已处理完毕,切换到下一章/下一节', 'ok');
+        return true; 
+      } else {
+        log('未找到下一章按钮(可能已是最后一章)', 'warn');
+      }
+    }
+    return false;
   }
 
   function startWatch() {
     initPanel();
+    enableBackgroundPlay(window);
     log('挂机引擎已启动,开始扫描任务点...', 'ok');
     setInterval(async () => {
       try {
+        if (PAUSED || running) return;
         const f = document.querySelector('#iframe');
         if (!f || !f.contentWindow) return;
         let url = '';
         try { url = f.contentWindow.location.href; } catch (e) { return; }
+        if (!url || url === 'about:blank') return;
         if (url !== lastIframeUrl) {
           lastIframeUrl = url;
-          if (!running) {
-            running = true;
-            setStatus('工作中');
-            try { await chapterLoop(); } catch (e) { log('主循环异常: ' + e.message, 'err'); }
-            running = false;
-            setStatus('待机');
+          running = true;
+          setStatus('工作中');
+          let jumpedToNext = false;
+          try {
+            jumpedToNext = await chapterLoop();
+          } catch (e) {
+            log('主循环异常: ' + e.message, 'err');
           }
+          if (jumpedToNext) {      
+            await sleep(2);
+            lastIframeUrl = '';
+          }
+          running = false;
+          if (!PAUSED && !jumpedToNext) setStatus('待机');
         }
       } catch (e) { /* ignore */ }
-    }, 3000);
-  }
-
-  /* ==================== 自动更新检测(空闲时自动刷新升级) ==================== */
-  function startAutoUpdater() {
-    let lastReloadAt = 0;
-    setInterval(async () => {
-      try {
-        if (PAUSED || running) return; // 有任务进行中不打断
-        const myV = (typeof GM_info !== 'undefined' && GM_info.script) ? GM_info.script.version : '0';
-        const text = await cxFetch('https://cdn.jsdelivr.net/gh/DaRin1403/xuexitong-autostudy@main/version.json', { timeout: 10000 });
-        const obj = JSON.parse(text);
-        if (obj.v && obj.v !== myV && Date.now() - lastReloadAt > 10 * 60 * 1000) {
-          log(`🔄 检测到新版本 v${obj.v}(当前 v${myV}),页面即将自动刷新升级...`, 'warn');
-          await sleep(3);
-          lastReloadAt = Date.now();
-          location.reload();
-        }
-      } catch (e) { /* 服务器不在线则忽略 */ }
-    }, 5 * 60 * 1000);
+    }, 2500);
   }
 
   /* ==================== 路由 ==================== */
   (function main() {
     startReporterHeartbeat();
     const path = location.pathname;
-    const chapterPages = ['/mycourse/studentstudy', '/mooc-ans/mycourse/studentstudy', '/mooc2-ans/mycourse/studentstudy'];
-    const homeworkPages = [
-      '/work/doHomeWorkNew', '/mooc-ans/work/doHomeWorkNew', '/mooc2-ans/work/doHomeWorkNew',
-      '/mooc2/work/dowork', '/mooc-ans/mooc2/work/dowork', '/mooc2-ans/mooc2/work/dowork'
-    ];
-    if (chapterPages.includes(path)) {
+    const isChapterPage = /\/mycourse\/studentstudy/.test(path);
+    const isHomeworkPage = /\/work\/(doHomeWorkNew|dowork)/.test(path);
+
+    if (isChapterPage) {
       initPanel();
       if (!location.href.includes('mooc2=1')) {
         log('检测到旧版章节页,正在切换到新版(mooc2)...', 'warn');
@@ -1728,10 +2327,9 @@
         return;
       }
       startWatch();
-      startAutoUpdater();
-    } else if (homeworkPages.includes(path)) {
+    } else if (isHomeworkPage) {
+      initPanel();
       homeworkTask();
-      startAutoUpdater();
     } else {
       console.log('[刷课助手] 当前页面不支持自动任务,请在课程章节学习页使用。');
     }
