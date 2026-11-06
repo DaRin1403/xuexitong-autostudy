@@ -1,5 +1,16 @@
 # 学习通(超星)刷课助手
 
+> **当前仓库为 xiangda233 维护的修复版（v1.0.11）**，Fork 自 [DaRin1403/xuexitong-autostudy](https://github.com/DaRin1403/xuexitong-autostudy)。
+>
+> **人工智能生成提示：本修复版由人工智能辅助生成，使用前请人工检查。** 原项目与 OCS 模块的来源、作者及许可证保持标注。
+>
+> 使用 [OCS 5.0 的文字解密模块](https://github.com/ocsjs/ocsjs/tree/06c2af62d2708f5042b913caf4a3cabb251e66a9/packages/scripts/src/utils/font-decrypt)修复题目乱码，并修复选项点击、增加立即答题和诊断日志。
+>
+> **行为说明：** 点击“立即获取题目并答题”会暂停后续挂机，填写后由你检查并手动提交；点击 ▶ 恢复挂机后才退出此模式。普通挂机保留原有自动提交功能，但填写成功改为核实实际选中状态，因此是否达到提交阈值可能变化。
+>
+> 改动理由与完整行为差异：[CHANGELOG.md](CHANGELOG.md) · 使用说明：[修复说明.md](修复说明.md)。17 项本地浏览器测试通过，真实课程页面仍待复测。安装时仅启用一个版本。
+
+
 > 一个油猴(Tampermonkey)脚本,自动完成学习通(超星)课程任务点。
 > **零基础可用**:不用写一行代码,装两个东西,填一个 Key,打开课程页就自动干活。
 
@@ -81,7 +92,7 @@
 
 **方法一(推荐,一键):** 点击下面这个链接,油猴会自动弹出安装窗口,点「安装」即可:
 
-👉 **[点此一键安装](https://cdn.jsdelivr.net/gh/DaRin1403/xuexitong-autostudy@main/%E5%AD%A6%E4%B9%A0%E9%80%9A%E5%88%B7%E8%AF%BE%E5%8A%A9%E6%89%8B.user.js)**
+👉 **[点此一键安装](https://cdn.jsdelivr.net/gh/xiangda233/xuexitong-autostudy@main/%E5%AD%A6%E4%B9%A0%E9%80%9A%E5%88%B7%E8%AF%BE%E5%8A%A9%E6%89%8B.user.js)**
 
 > 仓库刚发布时 CDN 需要几分钟同步,若打不开请稍等重试。用 Safari 或其他浏览器时,把上方的「点此一键安装」复制到地址栏打开同样有效。
 
