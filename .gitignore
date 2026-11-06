@@ -1,0 +1,5 @@
+.local/
+.tmp/
+node_modules/
+__pycache__/
+学习通-诊断日志*.json
